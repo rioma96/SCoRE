@@ -66,14 +66,14 @@ if configuration['eval_method']=='multi':
 
 
 ## want to extract dataset name from sh command line
-dataset="disrex"
-# dataset=sys.argv[1] 
+dataset=sys.argv[1]
+print(f'Running on dataset {dataset}')
 
 
 dict_dataset={}
 dict_dataset = {
-    'nyt10d': {'train': 'Final/NYT10DWOmarkers/Train/', 
-               'test': 'Final/NYT10DWOmarkers/Test/', 
+    'nyt10d': {'train': 'Final/NYT10D/Train/', 
+               'test': 'Final/NYT10D/Test/', 
                'val': None},
     'nyt10m': {'train': 'Final/NYT10m/Train/',
                'test': 'Final/NYT10m/Test/',
@@ -98,6 +98,18 @@ if dict_dataset[dataset]['val'] is not None:
 else:
     validation=False
 
+#Configuration parameters for the datasets (see on section VI.B of the paper)
+config_params = {
+    'nyt10m': {'c': 0.6, 'k': 50},
+    'nyt10d': {'c': 0.7, 'k': 100},
+    'disrex': {'c': 0.5, 'k': 50},
+    'wiki20m': {'c': 0.5, 'k': 100},
+    'wiki20distant': {'c': 0.7, 'k': 150}
+}
+
+#Select appropriate configuration parameters for the dataset
+configuration['kNN'] = config_params[dataset]['k']
+configuration['threshold'] = config_params[dataset]['c']
 
 
 
@@ -136,8 +148,8 @@ if validation:
     validation_dataset=validation_dataset.shuffle(buffer_size, reshuffle_each_iteration=True)
 
 
-
-for run in range(10):
+#Select a number of runs to perform the evaluation on the same dataset
+for run in range(3):
 
 
     tf.keras.backend.clear_session()
@@ -180,176 +192,169 @@ for run in range(10):
                             epochs = configuration['epochs'], 
                             callbacks=[callback]) 
 
-    
-    model.save_weights(f'{dataset}_model_{run}.h5')   
+    #Uncomment if you want save the weights of the model after training
+    #model.save_weights(f'{dataset}_model_{run}.h5')   
 
 
     list_results=[]
     row_keys=[]
-    for threshold in [0.5]:#[0.4,0.5,0.6,0.7]:
-        configuration['threshold']=threshold
-        for knn in [50]:#[50,100,150]:
-            configuration['kNN']=knn
-            for bool_bayesian in [False]:
-                for calibrated in [False]:
-                    for harmonic_score in [True]:
-                        row_results=[]
-                        configuration['get_thresholds']=bool_bayesian
-                        configuration['calibrated']=calibrated
-                        configuration['harmonic_score']=harmonic_score
 
-                        test_y_true, test_y_pred, test_y_score, results_perf, best_indices, test_y_pred_at_R = evaluation_and_performance(test_configuration=configuration,
-                                                                                            training_dataset=training_dataset,
-                                                                                            test_dataset=test_dataset,
-                                                                                            model=model
-                                                                                            )
-                        
-                        if bool_bayesian==True and calibrated==True and harmonic_score==True:
-                            print('\n\n RESULT USING CALIBRATED BAYESIAN FORMULATION HARMONIC')
-                            row_keys.append('BCH')
-                        elif bool_bayesian==True and calibrated==True and harmonic_score==False:
-                            print('\n\n RESULT USING CALIBRATED BAYESIAN FORMULATION MEAN')
-                            row_keys.append('BCM')
-                        elif bool_bayesian==True and calibrated==False and harmonic_score==True:
-                            print('\n\n RESULT USING BAYESIAN FORMULATION HARMONIC')
-                            row_keys.append('BH')
-                        elif bool_bayesian==True and calibrated==False and harmonic_score==False:
-                            print('\n\n RESULT USING BAYESIAN FORMULATION MEAN')
-                            row_keys.append('BM')
-                        elif bool_bayesian==False and calibrated==True and harmonic_score==True:
-                            print('\n\n RESULT USING CALIBRATED LIKELIHOOD FORMULATION HARMONIC')
-                            row_keys.append('LCH')
-                        elif bool_bayesian==False and calibrated==True and harmonic_score==False:
-                            print('\n\n RESULT USING CALIBRATED LIKELIHOOD FORMULATION MEAN')
-                            row_keys.append('LCM')
-                        elif bool_bayesian==False and calibrated==False and harmonic_score==True:
-                            print('\n\n RESULT USING LIKELIHOOD FORMULATION HARMONIC')
-                            row_keys.append('LH')
-                        else: 
-                            print('\n\n RESULT USING LIKELIHOOD FORMULATION MEAN')
-                            row_keys.append('LM')
-                        print('Performance on the whole validation set:\n')
-                        for key in results_perf['total']:
-                            if key!='list_f1':
-                                perf=results_perf['total'][key]
-                                print(f'{key}: {perf}')
-                                row_results.append(perf)
+    for bool_bayesian in [False]:
+        for calibrated in [False]:
+            for harmonic_score in [True]:
+                row_results=[]
+                configuration['get_thresholds']=bool_bayesian
+                configuration['calibrated']=calibrated
+                configuration['harmonic_score']=harmonic_score
 
-                        for atX in configuration['other_top_perf']:
-                            top_string='@'+str(atX)
-                            print(f'\n\Performance {top_string} on validation set:\n')
-                            for key in results_perf[f'@'+str(atX)]:
-                                if key!='list_f1':
-                                    perf=results_perf[f'@'+str(atX)][key]
-                                    print(f'{key}: {perf}')
-                                    row_results.append(perf)
+                test_y_true, test_y_pred, test_y_score, results_perf, best_indices, test_y_pred_at_R = evaluation_and_performance(test_configuration=configuration,
+                                                                                    training_dataset=training_dataset,
+                                                                                    test_dataset=test_dataset,
+                                                                                    model=model
+                                                                                    )
+                
+                if bool_bayesian==True and calibrated==True and harmonic_score==True:
+                    print('\n\n RESULT USING CALIBRATED BAYESIAN FORMULATION HARMONIC')
+                    row_keys.append('BCH')
+                elif bool_bayesian==True and calibrated==True and harmonic_score==False:
+                    print('\n\n RESULT USING CALIBRATED BAYESIAN FORMULATION MEAN')
+                    row_keys.append('BCM')
+                elif bool_bayesian==True and calibrated==False and harmonic_score==True:
+                    print('\n\n RESULT USING BAYESIAN FORMULATION HARMONIC')
+                    row_keys.append('BH')
+                elif bool_bayesian==True and calibrated==False and harmonic_score==False:
+                    print('\n\n RESULT USING BAYESIAN FORMULATION MEAN')
+                    row_keys.append('BM')
+                elif bool_bayesian==False and calibrated==True and harmonic_score==True:
+                    print('\n\n RESULT USING CALIBRATED LIKELIHOOD FORMULATION HARMONIC')
+                    row_keys.append('LCH')
+                elif bool_bayesian==False and calibrated==True and harmonic_score==False:
+                    print('\n\n RESULT USING CALIBRATED LIKELIHOOD FORMULATION MEAN')
+                    row_keys.append('LCM')
+                elif bool_bayesian==False and calibrated==False and harmonic_score==True:
+                    print('\n\n RESULT USING LIKELIHOOD FORMULATION HARMONIC')
+                    row_keys.append('LH')
+                else: 
+                    print('\n\n RESULT USING LIKELIHOOD FORMULATION MEAN')
+                    row_keys.append('LM')
+                print('Performance on the whole validation set:\n')
+                for key in results_perf['total']:
+                    if key!='list_f1':
+                        perf=results_perf['total'][key]
+                        print(f'{key}: {perf}')
+                        row_results.append(perf)
 
-                        top_string='@'+str(configuration['top_perf'])
-                        print(f'\n\Performance {top_string} on validation set:\n')
-                        for key in results_perf[f'@'+str(configuration['top_perf'])]:
-                            if key!='list_f1':
-                                perf=results_perf[f'@'+str(configuration['top_perf'])][key]
-                                print(f'{key}: {perf}')
-                                row_results.append(perf)
+                for atX in configuration['other_top_perf']:
+                    top_string='@'+str(atX)
+                    print(f'\n\Performance {top_string} on validation set:\n')
+                    for key in results_perf[f'@'+str(atX)]:
+                        if key!='list_f1':
+                            perf=results_perf[f'@'+str(atX)][key]
+                            print(f'{key}: {perf}')
+                            row_results.append(perf)
 
-                        PatR=precision_at_R_ml(test_y_true, test_y_pred_at_R)
-                        print(f'Precision @R: {PatR}')
-                        
-                        row_results.append(PatR)
-                        row_results.append(knn)
+                top_string='@'+str(configuration['top_perf'])
+                print(f'\n\Performance {top_string} on validation set:\n')
+                for key in results_perf[f'@'+str(configuration['top_perf'])]:
+                    if key!='list_f1':
+                        perf=results_perf[f'@'+str(configuration['top_perf'])][key]
+                        print(f'{key}: {perf}')
+                        row_results.append(perf)
 
-                        #Calculate correlation matrix and p-value matrix
+                PatR=precision_at_R_ml(test_y_true, test_y_pred_at_R)
+                print(f'Precision @R: {PatR}')
+                
+                row_results.append(PatR)
+                row_results.append(configuration['kNN'])
 
-                        # Sample one-hot encoded data (replace this with your actual data)
-                        one_hot_labels = test_y_true
+                #Calculate correlation matrix and p-value matrix
 
-                        # Convert the one-hot array to a DataFrame for easier manipulation
-                        df = pd.DataFrame(one_hot_labels, columns=link_dict.keys())
+                # Sample one-hot encoded data (replace this with your actual data)
+                one_hot_labels = test_y_true
 
-                        # Calculate the correlation matrix and the p-value matrix
-                        correlation_matrix_test = df.corr()
-                        p_value_matrix = pd.DataFrame(np.zeros(correlation_matrix_test.shape), columns=correlation_matrix_test.columns, index=correlation_matrix_test.index)
+                # Convert the one-hot array to a DataFrame for easier manipulation
+                df = pd.DataFrame(one_hot_labels, columns=link_dict.keys())
 
-                        for i in range(len(correlation_matrix_test.columns)):
-                            for j in range(len(correlation_matrix_test.columns)):
-                                if i != j:
-                                    _, p_value_matrix.iat[i, j] = pearsonr(df.iloc[:, i], df.iloc[:, j])
+                # Calculate the correlation matrix and the p-value matrix
+                correlation_matrix_test = df.corr()
+                p_value_matrix = pd.DataFrame(np.zeros(correlation_matrix_test.shape), columns=correlation_matrix_test.columns, index=correlation_matrix_test.index)
 
-                        # Set a significance level
-                        alpha = 0.05
+                for i in range(len(correlation_matrix_test.columns)):
+                    for j in range(len(correlation_matrix_test.columns)):
+                        if i != j:
+                            _, p_value_matrix.iat[i, j] = pearsonr(df.iloc[:, i], df.iloc[:, j])
 
-                        # Create a mask for significant correlations
-                        significant_mask = p_value_matrix < alpha
+                # Set a significance level
+                alpha = 0.05
 
-                        #Set diagonal of correlation_matrix_train to value 0
-                        np.fill_diagonal(correlation_matrix_test.values, 0.)
+                # Create a mask for significant correlations
+                significant_mask = p_value_matrix < alpha
+
+                #Set diagonal of correlation_matrix_train to value 0
+                np.fill_diagonal(correlation_matrix_test.values, 0.)
 
 
-                        df=pd.DataFrame(np.array(train_df['link_name'].tolist()), columns=link_dict.keys())
+                df=pd.DataFrame(np.array(train_df['link_name'].tolist()), columns=link_dict.keys())
 
-                        # Calculate the correlation matrix and the p-value matrix
-                        correlation_matrix_train = df.corr()
-                        p_value_matrix = pd.DataFrame(np.zeros(correlation_matrix_train.shape), columns=correlation_matrix_train.columns, index=correlation_matrix_train.index)
+                # Calculate the correlation matrix and the p-value matrix
+                correlation_matrix_train = df.corr()
+                p_value_matrix = pd.DataFrame(np.zeros(correlation_matrix_train.shape), columns=correlation_matrix_train.columns, index=correlation_matrix_train.index)
 
-                        for i in range(len(correlation_matrix_train.columns)):
-                            for j in range(len(correlation_matrix_train.columns)):
-                                if i != j:
-                                    _, p_value_matrix.iat[i, j] = pearsonr(df.iloc[:, i], df.iloc[:, j])
+                for i in range(len(correlation_matrix_train.columns)):
+                    for j in range(len(correlation_matrix_train.columns)):
+                        if i != j:
+                            _, p_value_matrix.iat[i, j] = pearsonr(df.iloc[:, i], df.iloc[:, j])
 
-                        # Set a significance level
-                        alpha = 0.05
+                # Set a significance level
+                alpha = 0.05
 
-                        # Create a mask for significant correlations
-                        significant_mask = p_value_matrix < alpha
+                # Create a mask for significant correlations
+                significant_mask = p_value_matrix < alpha
 
-                        #Set diagonal of correlation_matrix_train to value 0
-                        np.fill_diagonal(correlation_matrix_train.values, 0.)
+                #Set diagonal of correlation_matrix_train to value 0
+                np.fill_diagonal(correlation_matrix_train.values, 0.)
 
-                        # Sample one-hot encoded data (replace this with your actual data)
-                        one_hot_labels = test_y_pred
+                # Sample one-hot encoded data (replace this with your actual data)
+                one_hot_labels = test_y_pred
 
-                        # Convert the one-hot array to a DataFrame for easier manipulation
-                        df = pd.DataFrame(one_hot_labels, columns=link_dict.keys())
+                # Convert the one-hot array to a DataFrame for easier manipulation
+                df = pd.DataFrame(one_hot_labels, columns=link_dict.keys())
 
-                        # Calculate the correlation matrix and the p-value matrix
-                        correlation_matrix_pred = df.corr()
-                        p_value_matrix = pd.DataFrame(np.zeros(correlation_matrix_pred.shape), columns=correlation_matrix_pred.columns, index=correlation_matrix_pred.index)
+                # Calculate the correlation matrix and the p-value matrix
+                correlation_matrix_pred = df.corr()
+                p_value_matrix = pd.DataFrame(np.zeros(correlation_matrix_pred.shape), columns=correlation_matrix_pred.columns, index=correlation_matrix_pred.index)
 
-                        for i in range(len(correlation_matrix_pred.columns)):
-                            for j in range(len(correlation_matrix_pred.columns)):
-                                if i != j:
-                                    _, p_value_matrix.iat[i, j] = pearsonr(df.iloc[:, i], df.iloc[:, j])
+                for i in range(len(correlation_matrix_pred.columns)):
+                    for j in range(len(correlation_matrix_pred.columns)):
+                        if i != j:
+                            _, p_value_matrix.iat[i, j] = pearsonr(df.iloc[:, i], df.iloc[:, j])
 
-                        # Set a significance level
-                        alpha = 0.05
+                # Set a significance level
+                alpha = 0.05
 
-                        # Create a mask for significant correlations
-                        significant_mask = p_value_matrix < alpha
+                # Create a mask for significant correlations
+                significant_mask = p_value_matrix < alpha
 
-                        #Set diagonal of correlation_matrix_train to value 0
-                        np.fill_diagonal(correlation_matrix_pred.values, 0.)
+                #Set diagonal of correlation_matrix_train to value 0
+                np.fill_diagonal(correlation_matrix_pred.values, 0.)
 
 
-                        #Fill nan with zeros in correlation_matrix_pred
-                        correlation_matrix_pred=correlation_matrix_pred.fillna(0)
-                        correlation_matrix_test=correlation_matrix_test.fillna(0)
+                #Fill nan with zeros in correlation_matrix_pred
+                correlation_matrix_pred=correlation_matrix_pred.fillna(0)
+                correlation_matrix_test=correlation_matrix_test.fillna(0)
 
-                        distance = np.linalg.norm(correlation_matrix_test - correlation_matrix_pred, 'fro')
+                distance = np.linalg.norm(correlation_matrix_test - correlation_matrix_pred, 'fro')
 
-                        row_results.append(distance)
-                        row_results.append(threshold)
+                row_results.append(distance)
+                row_results.append(configuration['threshold'])
 
-                        if bool_bayesian==False and calibrated==False and harmonic_score==True:
-                            #Save correlation matrices with dataset name + iteration name as pickle
-                            correlation_matrix_test.to_pickle(f'{dataset}_LH_{run}_correlation_matrix_test_{run}_KNN_{knn}_threshold_{threshold}.pkl')
+                if bool_bayesian==False and calibrated==False and harmonic_score==True:
+                    #Save correlation matrices with dataset name + iteration name as pickle
+                    correlation_matrix_test.to_pickle(f'{dataset}_LH_{run}_correlation_matrix_test_{run}_KNN_{configuration['kNN']}_threshold_{configuration['threshold']}.pkl')
 
-                        list_results.append(row_results)
+                list_results.append(row_results)
 
-    #5 thresh - 3knn - solo LH - 4 dataset (3 run at dataset)
-    
-    
-    #Mettere le corr_mat nel loop e salvare solo mat pred lh + distance di tutti 
-    #Mettere anche ciclo knn 15-50-100
+
     indices=row_keys
     columns=['micro','Macro']
     for el in configuration['other_top_perf']:
