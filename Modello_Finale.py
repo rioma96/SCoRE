@@ -350,7 +350,7 @@ for run in range(3):
 
                 if bool_bayesian==False and calibrated==False and harmonic_score==True:
                     #Save correlation matrices with dataset name + iteration name as pickle
-                    correlation_matrix_test.to_pickle(f'{dataset}_LH_{run}_correlation_matrix_test_{run}_KNN_{configuration['kNN']}_threshold_{configuration['threshold']}.pkl')
+                    correlation_matrix_test.to_pickle(f"{dataset}_LH_{run}_correlation_matrix_test_{run}_KNN_{configuration['kNN']}_threshold_{configuration['threshold']}.pkl")
 
                 list_results.append(row_results)
 

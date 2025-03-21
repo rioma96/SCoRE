@@ -1,0 +1,13 @@
+# Ignora i file di log
+*.log
+
+# Ignora i file di configurazione dell'editor
+.vscode/
+.idea/
+
+# Ignora i file di compilazione
+*.pyc
+__pycache__/
+
+# Ignora la cartella Final
+Final/
