@@ -81,7 +81,7 @@ def evaluation_and_performance(test_configuration:dict,
                                                                                 test_dataset=test_dataset,
                                                                                 model=model)
     else:
-        test_y_true, test_y_pred, top_indices, test_y_score, test_y_pred_at_R = similarity_to_class(
+        test_y_true, test_y_pred, top_indices, test_y_score, test_y_pred_at_R, norm_w_batch_total, test_batch_weights_total, total_distances, all_indices = similarity_to_class(
                                                                             test_configuration=test_configuration,
                                                                             training_dataset=training_dataset,
                                                                             test_dataset=test_dataset,
@@ -122,7 +122,7 @@ def evaluation_and_performance(test_configuration:dict,
     if eval_method!='multi':
         return  test_y_true, test_y_pred, test_y_score, results_perf, top_indices
     else: 
-        return  test_y_true, test_y_pred, test_y_score, results_perf, top_indices, test_y_pred_at_R
+        return  test_y_true, test_y_pred, test_y_score, results_perf, top_indices, test_y_pred_at_R, norm_w_batch_total, test_batch_weights_total, total_distances, all_indices
     
 def similarity_to_class(test_configuration:dict,
                         training_dataset:tf.data.Dataset,
@@ -171,11 +171,11 @@ def similarity_to_class(test_configuration:dict,
         return test_y_true, test_y_pred, top_indices, test_y_score
     
     else:
-        test_y_true, test_y_pred, top_indices, test_y_score, test_y_pred_at_R = f_class(training_dataset=training_dataset,
+        test_y_true, test_y_pred, top_indices, test_y_score, test_y_pred_at_R, norm_w_batch,test_batch_weight,total_distances, all_indices = f_class(training_dataset=training_dataset,
                                                                                 test_dataset=test_dataset,
                                                                                 model=model,
                                                                                 test_configuration=test_configuration)
-        return test_y_true, test_y_pred, top_indices, test_y_score, test_y_pred_at_R
+        return test_y_true, test_y_pred, top_indices, test_y_score, test_y_pred_at_R, norm_w_batch,test_batch_weight,total_distances, all_indices
 
 """
 def similarity_to_class(test_configuration:dict,
@@ -607,6 +607,7 @@ def process_train_batch_kNN(train_batch_x,
     n_jobs = test_configuration['n_jobs']
     top_perf = test_configuration['top_perf']
     eval_method=test_configuration['eval_method']
+    Q=test_configuration['q']
 
     model=CreateModelSkeleton(test_configuration)
 
@@ -619,15 +620,16 @@ def process_train_batch_kNN(train_batch_x,
     distances_embedding, indices = nbrs.kneighbors(test_batch_embedding)
 
     weights = np.exp(-distances_embedding / temperature)
-    weightsP = np.sum(np.expand_dims(weights, -1) * train_batch_y.numpy()[indices, :], 1)
+    weightsP = np.sum(np.expand_dims(weights, -1) *  train_batch_y.numpy()[indices, :], 1)
+    print("DIMENSIONE Y  ", train_batch_y.numpy()[indices, :].shape)
     
     if eval_method=='multi':
-        weightsN=np.sum(np.expand_dims(weights, -1) * (1-train_batch_y.numpy())[indices, :], 1)
+        weightsN=np.sum(np.expand_dims(weights, -1) *  (1-train_batch_y.numpy())[indices, :], 1)
         weightsPN=np.concatenate([np.expand_dims(weightsP, 0),np.expand_dims(weightsN, 0)],0)
         
-        return weightsPN
+        return weightsPN, distances_embedding, indices
     else:
-        return weightsP
+        return weightsP, distances_embedding, indices
     
 
 
@@ -668,7 +670,8 @@ def process_train_batch_kNN_weighted(train_batch_x,
     
     if test_configuration['get_thresholds']:
         class_weights=test_configuration['class_probabilities']
-        weightsP = (train_batch_y.numpy()[indices, :]*np.expand_dims(weights, -1)).sum(1)*np.expand_dims(class_weights,0)
+        weightsP = (train_batch_y.numpy()[indices, :]*np.expand_dims(weights, -1)).sum(1)*np.expand_dims(class_weights,0)  
+       
     else: 
         weightsP = np.sum(np.expand_dims(weights, -1) * train_batch_y.numpy()[indices, : ], 1)
     
@@ -680,9 +683,9 @@ def process_train_batch_kNN_weighted(train_batch_x,
             weightsN=np.sum(np.expand_dims(weights, -1) * (1-train_batch_y.numpy())[indices, : ] , 1)
         weightsPN=np.concatenate([np.expand_dims(weightsP, 0),np.expand_dims(weightsN, 0)],0)
         
-        return weightsPN
+        return weightsPN, distances_embedding
     else:
-        return weightsP
+        return weightsP, distances_embedding
 
 
     
@@ -857,6 +860,10 @@ def chunk_kNN_ml_prediction(training_dataset:tf.data.Dataset,
     test_y_true=[]
     test_y_score=[]
     test_y_pred_at_R=[]
+    norm_w_batch_total=[]
+    test_batch_weights_total=[]
+    distances_embedding_total=[]
+    all_indices = []
     
     #load each chunck of validation data and compute embeddings
     for test_batch_x, test_batch_y in test_dataset.batch(val_batch):
@@ -866,35 +873,27 @@ def chunk_kNN_ml_prediction(training_dataset:tf.data.Dataset,
         
         if test_configuration['get_thresholds']:
             for train_batch_x, train_batch_y in training_dataset.batch(val_batch):
-                weights = process_train_batch_kNN_weighted(train_batch_x, 
+                weights, distances, indices = process_train_batch_kNN_weighted(train_batch_x, 
                                                 train_batch_y, 
                                                 test_batch_embedding, 
                                                 model_weights, 
                                                 test_configuration,
                                                 algo )
                 test_batch_weights += weights
+                distances_embedding_total.append(distances)
+                all_indices.append(indices)
         else:
             for train_batch_x, train_batch_y in training_dataset.batch(val_batch):
-                weights = process_train_batch_kNN(train_batch_x, 
+                weights, distances, indices = process_train_batch_kNN(train_batch_x, 
                                                 train_batch_y, 
                                                 test_batch_embedding, 
                                                 model_weights, 
                                                 test_configuration,
                                                 algo )
                 test_batch_weights += weights
+                distances_embedding_total.append(distances)
+                all_indices.append(indices)
 
-        '''results = Parallel(n_jobs=n_jobs)(
-            delayed(process_train_batch_kNN)(train_batch_x, 
-                                             train_batch_y, 
-                                             test_batch_embedding, 
-                                             model_weights, 
-                                             test_configuration,
-                                             algo       
-            ) for train_batch_x, train_batch_y in training_dataset.batch(val_batch)
-        )
-
-        for weights in results:
-            test_batch_weights += weights'''
 
         # Compute val chunk predicted labels using argmax and add them to the validation set label array
         norm_w_batch = (test_batch_weights/(test_batch_weights.sum(0,keepdims=True)))[0]
@@ -928,6 +927,8 @@ def chunk_kNN_ml_prediction(training_dataset:tf.data.Dataset,
         test_y_score.append(test_y_score_batch)
         test_y_true.append(test_batch_y)
         test_y_pred_at_R.append(pred_at_R_batch)
+        norm_w_batch_total.append(norm_w_batch)
+        test_batch_weights_total.append(test_batch_weights)
 
 
     assert len(test_batch_y.shape) == 2
@@ -936,10 +937,14 @@ def chunk_kNN_ml_prediction(training_dataset:tf.data.Dataset,
     test_y_pred = np.concatenate(test_y_pred)
     test_y_score = np.concatenate(test_y_score)
     test_y_pred_at_R = np.concatenate(test_y_pred_at_R)
+    norm_w_batch = np.concatenate(norm_w_batch_total)
+    test_batch_weights = np.concatenate(test_batch_weights_total)
+    distances_embedding_total = np.concatenate(distances_embedding_total)
+    all_indices = np.concatenate(all_indices)
 
     top_indices = np.argsort(-test_y_score)[:top_perf]
 
-    return test_y_true, test_y_pred, top_indices, test_y_score, test_y_pred_at_R
+    return test_y_true, test_y_pred, top_indices, test_y_score, test_y_pred_at_R, norm_w_batch_total, test_batch_weights_total, distances_embedding_total, all_indices
 
 
 

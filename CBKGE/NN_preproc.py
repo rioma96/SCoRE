@@ -138,6 +138,8 @@ def from_file_list_to_tfdataset(file_list,
     
     df['Concatenated'] = df.apply(concatenate_arrays, args=(cls,), axis=1)
     df = df[['Concatenated', 'link_name', 'syn_id_head', 'syn_id_tail']]
+    df=df[df['Concatenated'].apply(lambda x: not np.isnan(np.sum(x)))]
+
     
     print("Dataset loaded")
     

@@ -1,6 +1,9 @@
 # Ignora i file di log
 *.log
 
+#Ignora i Pickle
+*.pkl
+
 # Ignora i file di configurazione dell'editor
 .vscode/
 .idea/
@@ -11,3 +14,5 @@ __pycache__/
 
 # Ignora la cartella Final
 Final/
+RawDatasets/
+Datasets/
