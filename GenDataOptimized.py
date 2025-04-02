@@ -14,6 +14,7 @@ import sys
 import tensorflow as tf
 import tensorflow_hub as hub
 import tensorflow_text as text
+import torch
 import time 
 import concurrent.futures
 from multiprocessing import Lock, Pool
@@ -21,7 +22,7 @@ from codecarbon import track_emissions
 import argparse
 import logging
 from codecarbon import track_emissions
-from transformers import TFRobertaModel, RobertaTokenizer
+from transformers import TFRobertaModel, RobertaTokenizer, MambaConfig, MambaModel, AutoTokenizer, MambaForCausalLM
 from joblib import Parallel, delayed
 
 #mp.set_start_method('spawn', force=True)
@@ -422,6 +423,62 @@ def init_BERT(only_real_token=False, extract_CLS_only=False):
     return embedding_model, preprocessor,tokenize
 
 
+def init_Mamba(only_real_token=False, extract_CLS_only=False):
+    try:
+
+        model_name = "state-spaces/mamba-130m-hf"
+        
+        # Load tokenizer and model
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        model = MambaForCausalLM.from_pretrained(model_name)
+        
+        # Add special tokens if missing
+        if tokenizer.pad_token is None:
+            tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+        if tokenizer.eos_token is None:
+            tokenizer.add_special_tokens({'eos_token': '[EOS]'})
+        
+        class MambaEmbeddingModel(tf.keras.Model):
+            def __init__(self, model, tokenizer):
+                super(MambaEmbeddingModel, self).__init__()
+                self.model = model
+                self.tokenizer = tokenizer
+                self.model.eval()  # Set to evaluation mode
+                
+            def call(self, inputs):
+                # Ensure input is properly formatted for tokenizer
+                if isinstance(inputs, tf.Tensor):
+                    texts = [x.numpy().decode('utf-8') for x in inputs]
+                else:
+                    texts = [str(x) for x in inputs]
+                
+                # Tokenize with proper input format
+                tokens = self.tokenizer(
+                    text=texts,  # Explicitly specify text input
+                    padding='max_length',
+                    truncation=True,
+                    max_length=512,
+                    return_tensors='pt'  # Use PyTorch tensors for model
+                )
+                
+                # Get embeddings
+                with torch.no_grad():
+                    outputs = self.model(
+                        input_ids=tokens['input_ids'],
+                        attention_mask=tokens['attention_mask'],
+                        output_hidden_states=True
+                    )
+                
+                # Convert to TensorFlow tensors
+                return tf.convert_to_tensor(outputs.hidden_states[-1].numpy())
+        
+        keras_model = MambaEmbeddingModel(model, tokenizer)
+        return keras_model, None, tokenizer
+        
+    except Exception as e:
+        print(f"Error initializing Mamba: {str(e)}")
+        raise
+
 def init_RoBERTa(only_real_token=False, extract_CLS_only=False):
     model_name = "roberta-base"
     tokenizer = RobertaTokenizer.from_pretrained(model_name)
@@ -477,11 +534,19 @@ def find_entity_tensor_slice(frase, preprocessor, entity_start_pos, entity_end_p
         tokens_to_end = preprocessor.tokenize(frase[:entity_end_pos])
         # Tokenize just the entity
         entity_tokens = preprocessor.tokenize(frase[entity_start_pos:entity_end_pos])
-        # logger.info(f"Tokens to end of entity: {tokens_to_end}")
-        # logger.info(f"Entity tokens: {entity_tokens}")
         
         bound_end = len(tokens_to_end) + 1  # +1 for [CLS]
         bound_start = bound_end - len(entity_tokens)
+    
+    elif hasattr(preprocessor, 'name_or_path') and 'mamba' in preprocessor.name_or_path.lower():  # Mamba case
+        # Tokenize the full sentence up to entity end
+        tokens_to_end = preprocessor.tokenize(frase[:entity_end_pos])
+        # Tokenize just the entity
+        entity_tokens = preprocessor.tokenize(frase[entity_start_pos:entity_end_pos])
+        
+        bound_end = len(tokens_to_end) + 1  # +1 for [CLS]
+        bound_start = bound_end - len(entity_tokens)
+    
     else:  # BERT case
         tokenized_to_entity_end = preprocessor.tokenize(tf.constant([frase[:entity_end_pos]])).to_list()[0]
         entity_tokenized = preprocessor.tokenize(tf.constant([frase[entity_start_pos:entity_end_pos]])).to_list()[0]
@@ -512,6 +577,13 @@ def check_if_head_tail_are_included_in_Tokens(sentence, preprocessor, h_s, h_e, 
         tokens = preprocessor.tokenize(sentence_to_index)
         tokens_of_sub_text = tokens
         # logger.info(f"Tokens: {tokens}")
+
+    elif hasattr(preprocessor, 'name_or_path') and 'mamba' in preprocessor.name_or_path.lower():  # Mamba case
+        # Tokenize the full sentence up to entity end
+        tokens = preprocessor.tokenize(sentence_to_index)
+        tokens_of_sub_text = tokens
+        # logger.info(f"Tokens: {tokens}")
+    
     else:  # BERT case
         sub_sentence = tf.constant([sentence_to_index])
         tokenized_sub_text = preprocessor.tokenize(sub_sentence)
@@ -538,11 +610,12 @@ def add_entities_markers(sentence,h_s, h_e, t_s, t_e):
 ####Function to generate sentence embedding for each row of a dataframe####
 ####Returns a list containing a tensor for CLS, tensors for head tokens and tail tokens#####
 def embedd_row(row,model,preprocessor,markers=False):
+    # logger.info(f"Processing row: {row}")
     if markers:
         row['sentence'], row['head_start'], row['head_end'], row['tail_start'], row['tail_end'] = add_entities_markers(row['sentence'],row['head_start'], row['head_end'], row['tail_start'], row['tail_end'])
-
+    # logger.info(f"Processing sentence: {row['sentence']}")
     emt=model(tf.constant([row['sentence']]))
-
+    # logger.info(f"Embedding shape: {emt[0].shape}")
     included,_=check_if_head_tail_are_included_in_Tokens(row['sentence'], preprocessor, row['head_start'], row['head_end'],
                                                          row['tail_start'], row['tail_end'], bert_token_window=512)
     head_included, tail_included = check_if_head_tail_are_included_in_sentence(row['sentence'], row['head_start'], row['head_end'], row['tail_start'], row['tail_end'])
@@ -597,6 +670,8 @@ def init_worker(model_name):
         model, preprocessor, _ = init_BERT()
     elif model_name == "roberta":
         model, _, preprocessor = init_RoBERTa()
+    elif model_name == "mamba":
+        model, _, preprocessor = init_Mamba()
     return model, preprocessor
 
 def process_chunk(chunk, model_name):
@@ -662,7 +737,7 @@ def preprocess_and_embed(dataset_name, model_name, NA=False):
         logger.info(f"Processing {len(chunks)} chunks with {num_workers} workers...")
 
         # Process chunks in parallel using Joblib
-        results = Parallel(n_jobs=num_workers, backend="loky")(
+        results = Parallel(n_jobs=num_workers, backend="multiprocessing")(
             delayed(process_chunk)(chunk, model_name) for chunk in chunks
         )
 
@@ -689,13 +764,15 @@ def main():
     start_time = time.time()
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, required=True, help='Name of the dataset to process.')
+    parser.add_argument('--model', type=str, default='mamba', choices=['bert', 'roberta', 'mamba'], 
+                       help='Model to use for embeddings (bert, roberta, or mamba)')
     args = parser.parse_args()
     dataset = args.dataset
+    model_name = args.model
     use_NA = False
-    model_name = "roberta"
     preprocess_and_embed(dataset, model_name, use_NA)
     end_time = time.time()
-    logger.info(f"Execution time: {end_time - start_time:.2f} seconds for dataset: {dataset}")
+    logger.info(f"Execution time: {end_time - start_time:.2f} seconds for dataset: {dataset} with model: {model_name}")
 
 if __name__ == "__main__":
     main()

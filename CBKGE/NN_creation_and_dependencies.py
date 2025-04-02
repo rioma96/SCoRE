@@ -238,7 +238,7 @@ def MLP(input_shape,depth,pert,output_dimensions,activation='relu'):
 
     neurons_per_layer = round(depth/pert)
     layers=[
-            Input(shape=(input_shape)),
+            Input(shape=(input_shape,)),
             Flatten(),
             *[Dense(neurons_per_layer, activation=activation) for i in range(depth)]]
     
@@ -416,6 +416,7 @@ def CreateModelSkeleton(training_configuration:dict):
         pert=training_configuration['pert']
         output_dimensions=training_configuration['output_dimensions']
         model=MLP(input_shape,depth,pert,output_dimensions,activation=activation)
+        model.compile() 
     
     elif architecture=='PARE_CL':
         LLM_encoder, _, _ = init_BERT()
@@ -426,11 +427,9 @@ def CreateModelSkeleton(training_configuration:dict):
             attention_features=training_configuration['attention_features'],
             dense_neurons=training_configuration['dense_neurons'],
             activation=training_configuration['activation'])
+        model.compile() 
+        model.build(input_shape=(None, 1))
 
-        
-
-    model.compile() 
-    model.build(input_shape=(None, 1))
 
     print('model weights skeleton', sum([el.size for el in model.get_weights()]))
     
