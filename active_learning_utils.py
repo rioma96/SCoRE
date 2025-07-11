@@ -1,14 +1,11 @@
 import random
 import numpy as np
 import tensorflow as tf
+from CBKGE.utilities_validation import evaluation_and_performance
 
-'''Warning di ram:
-2025-07-06 14:13:18.775703: W tensorflow/core/kernels/data/prefetch_autotuner.cc:52] 
-Prefetch autotuner tried to allocate 288921600 bytes after encountering the first element
- of size 288921600 bytes.This already causes the autotune ram budget to be exceeded.
- To stay within the ram budget, either increase the ram budget or reduce element size
-'''
- 
+
+
+
 # Seleziona |step_size| indici casuali nel dataframe senza considerare gli "already_selected"
 def random_sampling(full_df,selected_indices,step_size,seed=42):
     random.seed(seed)
@@ -186,13 +183,96 @@ def balanced_sampling_until_step_size(full_df, selected_indices, step_size, seed
 
 
 
+#---------------------------------------------------------------
+#               Entropy based Sampling
+#---------------------------------------------------------------
+
+# Computa l'entropy per un sample 
+# Gli sarà passata la matrice intera:  (n_sample, n_laben)  con valore p_1 (proba. che sia 1)
+# ES: 3 sample con 2 clasi
+# s1:  [ 0.5 0.6  ]
+# s2: ....
+# La funzione trasforma ogni p_1 all'entropia associata e dopo fa la somma per riga
+# ris: totale entropia per sample
+def compute_entropy_of_samples(p_test):
+    Hk = -(p_test * np.log(p_test + 1e-10) + (1 - p_test) * np.log(1 - p_test + 1e-10))
+    sample_entropy = np.sum(Hk, axis=1)
+    return sample_entropy
+
+# La funzione calcolo l'entropia per ogni sample del pool (train rimanente) e prende i top_step_size
+# incerti (>entropy)
+def entropy_based_sampling(full_df, selected_indices, step_size, model, configuration, seed=42):
+
+    random.seed(seed)
+    np.random.seed(seed)
+
+    remaining_indices = list(set(range(len(full_df))) - set(selected_indices))
+    remaining_df = full_df.iloc[remaining_indices].reset_index(drop=True)
+
+    # Costruiamo dataset TensorFlow da remaining_df (il pool)
+    inputs = np.array(remaining_df['Concatenated'].tolist())
+    labels = np.array(remaining_df['link_name'].tolist())
+    test_dataset = tf.data.Dataset.from_tensor_slices((inputs, labels))
+    test_dataset = test_dataset.batch(configuration['batch_size'])
+
+    # Valuto il modello su questo pool per ottenere il vettore delle probabilità
+    _, _, _, _, _, _, _, norm_w_batch, _, _ = evaluation_and_performance(
+        test_configuration=configuration,
+        training_dataset=None,
+        test_dataset=test_dataset,
+        model=model
+    )
+
+    #norm_w_batch è il vettore delle probabilità, trasformiamo in array numpy così che "compute_entropy.." abbia il comportamento aspettato
+    norm_w_batch = np.array(norm_w_batch)
+    print(f"[DEBUG] Shape di norm_w_batch {norm_w_batch[0].shape}")  #ti aspetti grande quando il remaining training_df
+    entropy_scores = compute_entropy_of_samples(norm_w_batch[0])
+
+    # argsort ordina in modo crescente, [-step_size:] prende gli ultimi (+incerti) e [::-1] per invertire l'ordine
+    top_k_idx_in_pool = np.argsort(entropy_scores)[-step_size:][::-1]
+
+    # Devo ritornare gli indici top_k ma questi sono relativi a "remaning_indices", io li voglio  assoluti rispetto a full_idf
+    selected_absolute_indices = [remaining_indices[i] for i in top_k_idx_in_pool]
+
+    return selected_absolute_indices
+
+''' DEMO:
+full_df = 10 sample totali
+already_selected = [1, 5, 8]
+remaining_indices = [0, 2, 3, 4, 6, 7, 9]  # => 7 elementi nel pool
+
+entropy_scores = np.array([0.1, 0.5, 0.2, 0.9, 0.3, 0.8, 0.6])
+step_size = 3
+np.argsort(entropy_scores) => [0, 2, 4, 1, 6, 5, 3]
+[-3:][::-1] => [3, 5, 6] => entropie: [0.9, 0.8, 0.6]
+top_k_idx_in_pool = [3, 5, 6]  (tramite argsort)
+selected_absolute_indices = [remaining_indices[i] for i in top_k_idx_in_pool]
+                        = [remaining_indices[3], remaining_indices[5], remaining_indices[6]]
+                        = [4, 7, 9]     # Indici nel full_df!
+
+'''
+
+
+
+
+
+
+
 # A partire dal full_df crea il tensore usando solo il sottoinsieme del train che ci interessa
 #   (indici selezionati in precedenza + selezionati ora)
-def select_active_subset(full_df, selected_indices, step_size, sampling_function=random_sampling,seed=42):
 
-
-    #funzione di sampling presa da parametro [riusabilità]
-    new_indices = sampling_function(full_df,selected_indices,step_size,seed=seed)
+def select_active_subset(full_df, selected_indices, step_size, 
+                        sampling_function=random_sampling, seed=42, 
+                        model=None, configuration=None):
+    
+    #Alla prima iterazione sarà random sampling, dopo quella passata come parametro
+    if selected_indices == []:
+        new_indices = random_sampling(full_df, selected_indices, step_size, seed)
+    elif sampling_function.__name__ == "entropy_based_sampling":
+        assert model is not None and configuration is not None, "Model e configuration sono obbligatori per entropy sampling"
+        new_indices = sampling_function(full_df, selected_indices, step_size, model, configuration, seed)
+    else:
+        new_indices = sampling_function(full_df, selected_indices, step_size, seed)
 
 
     already_selected = set(selected_indices)
@@ -207,3 +287,7 @@ def select_active_subset(full_df, selected_indices, step_size, sampling_function
 
 
     return dataset, final_indices, df_subset
+
+
+    
+

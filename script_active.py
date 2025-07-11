@@ -63,7 +63,8 @@ configuration = {'input_shape': 1536,#2304, # 1536,
                  'return_headtail':False,
                  'other_top_perf':[100,200,300],
                  'calibrated':False,
-                 'harmonic_score':True
+                 'harmonic_score':True,
+                 'q':None
                 }
 
 
@@ -179,7 +180,7 @@ def log_debug(message):
         f.write(message + "\n")
 
 
-from active_learning_utils import select_active_subset,fixed_num_and_random_remaining_sampling, balanced_sampling_until_step_size,random_sampling
+from active_learning_utils import select_active_subset,fixed_num_and_random_remaining_sampling, balanced_sampling_until_step_size,random_sampling,entropy_based_sampling
 
 
 train_lenght = len(training_dataset)
@@ -187,8 +188,8 @@ log_debug(f"[DEBUG]  Lunghezza del train di partenza: {train_lenght}")
 max_iters = 40               # Iterazioni di active    
 added_sample_per_iter = train_lenght // max_iters          
 selected_indices = []       #  conterrà gli indici selezionati dall'active  [ad ogni iterazione viene aggiornato]
-sampling_fun=random_sampling    #fixed...
-sampling_fun_name = "random"    #'fixed'  #'balanced'    per salvataggio
+sampling_fun=entropy_based_sampling    #fixed...
+sampling_fun_name = "entropy"    #'fixed'  #'balanced'    per salvataggio
 
 
 # Ad ogni iterazione add 1/40 del train_set
@@ -198,26 +199,23 @@ for iteration in range(1, max_iters + 1):
     log_debug(f"[DEBUG] Iter {iteration}: Memory usage: {process.memory_info().rss / 1024 ** 2:.2f} MB")
    
 
-    #Dizionario ha il solo scopo per facilitare la comprensione
-    active_utils = {
-        'iteration': iteration,
-        'selected_indices': selected_indices,       #per sapere il train della iterazione i-1
-        'added_sample_per_iter':added_sample_per_iter
-    }
-   
+    # "placeHolder" per non far fallire la prima chiamata si "selec.." che cmq non lo usa
+    model = [] 
+
     # Filtro il ds in base all'iterazione  (indici precedenti + selezionati da questa iter)
-    # train_df devo anche "filtrare"?  [penso di si per le analisi che utilizzano train_df correlation matrix etc]
     # Nota: non perdo mai l'handle al "train_df" originale, invece lo perdo per il tensore, che ricostruisco ad ogni iterazione
     training_dataset, selected_indices, filtered_train_df = select_active_subset(
-                                                                train_df,
-                                                                selected_indices,
-                                                                added_sample_per_iter,
-                                                                sampling_function = sampling_fun
-                                                            )
+                                                                        train_df,
+                                                                        selected_indices,
+                                                                        added_sample_per_iter,
+                                                                        sampling_function = sampling_fun,
+                                                                        model=model,
+                                                                        configuration=configuration
+                                                                    )
     log_debug(f"[DEBUG] Lunghezza del train all'iterazione {iteration}:{len(training_dataset)}")
 
 
-    # Da qui in poi rimane inalterato
+    # DA QUI IN POI RIMANE INALTERATO
 
 
     buffer_size=len(training_dataset)
