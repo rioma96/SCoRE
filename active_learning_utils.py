@@ -2,6 +2,7 @@ import random
 import numpy as np
 import tensorflow as tf
 from CBKGE.utilities_validation import evaluation_and_performance
+import json
 
 
 
@@ -178,6 +179,7 @@ def balanced_sampling_until_step_size(full_df, selected_indices, step_size, seed
         selected_final = selected_final[:step_size]  # Taglia esattamente a step_size
 
     print(f"[DEBUG] Totale selezionato: {len(selected_final)} elementi")
+    
     return selected_final
 
 
@@ -195,7 +197,7 @@ def balanced_sampling_until_step_size(full_df, selected_indices, step_size, seed
 # La funzione trasforma ogni p_1 all'entropia associata e dopo fa la somma per riga
 # ris: totale entropia per sample
 def compute_entropy_of_samples(p_test):
-    Hk = -(p_test * np.log(p_test + 1e-10) + (1 - p_test) * np.log(1 - p_test + 1e-10))
+    Hk = -(p_test * np.log2(p_test + 1e-10) + (1 - p_test) * np.log2(1 - p_test + 1e-10))
     sample_entropy = np.sum(Hk, axis=1)
     return sample_entropy
 
@@ -215,17 +217,26 @@ def entropy_based_sampling(full_df, selected_indices, step_size, model, configur
     test_dataset = tf.data.Dataset.from_tensor_slices((inputs, labels))
     test_dataset = test_dataset.batch(configuration['batch_size'])
 
+    # Costruisco training dataset dagli already_selected (per la funzione "evaluation_and_performace")
+    selected_df = full_df.iloc[selected_indices].reset_index(drop=True)
+    inputs_train = np.array(selected_df['Concatenated'].tolist())
+    labels_train = np.array(selected_df['link_name'].tolist())
+    training_dataset = tf.data.Dataset.from_tensor_slices((inputs_train, labels_train))
+    training_dataset = training_dataset.batch(configuration['batch_size'], drop_remainder=False)
+
+
     # Valuto il modello su questo pool per ottenere il vettore delle probabilità
+
     _, _, _, _, _, _, _, norm_w_batch, _, _ = evaluation_and_performance(
         test_configuration=configuration,
-        training_dataset=None,
+        training_dataset=training_dataset,
         test_dataset=test_dataset,
         model=model
     )
 
     #norm_w_batch è il vettore delle probabilità, trasformiamo in array numpy così che "compute_entropy.." abbia il comportamento aspettato
     norm_w_batch = np.array(norm_w_batch)
-    print(f"[DEBUG] Shape di norm_w_batch {norm_w_batch[0].shape}")  #ti aspetti grande quando il remaining training_df
+    print(f"[DEBUG] Shape di norm_w_batch {norm_w_batch[0].shape}")  #ti aspetti grande quanto il remaining training_df
     entropy_scores = compute_entropy_of_samples(norm_w_batch[0])
 
     # argsort ordina in modo crescente, [-step_size:] prende gli ultimi (+incerti) e [::-1] per invertire l'ordine
@@ -243,7 +254,7 @@ remaining_indices = [0, 2, 3, 4, 6, 7, 9]  # => 7 elementi nel pool
 
 entropy_scores = np.array([0.1, 0.5, 0.2, 0.9, 0.3, 0.8, 0.6])
 step_size = 3
-np.argsort(entropy_scores) => [0, 2, 4, 1, 6, 5, 3]
+np.argsort(entropy_scores) => [0, 2, 4, 1, 6, 5, 3]  (ordine da rovesciare)
 [-3:][::-1] => [3, 5, 6] => entropie: [0.9, 0.8, 0.6]
 top_k_idx_in_pool = [3, 5, 6]  (tramite argsort)
 selected_absolute_indices = [remaining_indices[i] for i in top_k_idx_in_pool]
@@ -253,14 +264,235 @@ selected_absolute_indices = [remaining_indices[i] for i in top_k_idx_in_pool]
 '''
 
 
+# Funzione analoga alla prima, ma usa "model.predict()" per calcolo delle predizioni
+def entropy_based_sampling2(full_df, selected_indices, step_size, model, configuration, seed=42):
 
+    random.seed(seed)
+    np.random.seed(seed)
+
+    remaining_indices = list(set(range(len(full_df))) - set(selected_indices))
+    remaining_df = full_df.iloc[remaining_indices].reset_index(drop=True)
+
+    # Preparazioend degli  input per model.predict
+    inputs = np.array(remaining_df['Concatenated'].tolist())
+
+    # Creo il dataset TensorFlow per il pool
+    test_dataset = tf.data.Dataset.from_tensor_slices(inputs)
+    test_dataset = test_dataset.batch(configuration['batch_size'])
+
+    #probabilità direttamente dal modello
+    try:
+        proba_batch = model.predict(test_dataset, verbose=0)
+    except Exception as e:
+        print(f"[ERRORE] durante model.predict: {e}")
+        raise
+
+    proba_batch = np.array(proba_batch)
+    # Clip per garantire che le probabilità siano in [1e-7, 1 - 1e-7]
+    proba_batch = np.clip(proba_batch, 1e-7, 1 - 1e-7)
+
+
+    print(f"[DEBUG] Proba batch shape: {proba_batch.shape}")
+    print(proba_batch)
+
+    entropy_scores = compute_entropy_of_samples(proba_batch)
+
+    top_k_idx_in_pool = np.argsort(entropy_scores)[-step_size:][::-1]
+
+    #trasformo gli indici in globali (vedi demo sopra)
+    selected_absolute_indices = [remaining_indices[i] for i in top_k_idx_in_pool]
+
+    print(f"[DEBUG] Numero di indici selezionati: {len(selected_absolute_indices)}")
+
+    
+    # ---------------------
+    # DEBUG: 
+    # - 1° file   ( test funzionamento)
+    # - 2° file  (analisi dei valori dell'entropia)
+    # ---------------------
+    import os
+    debug_path = "debug_entropy.txt"
+    with open(debug_path, "a") as f:
+        f.write(f"\n\nGrandezza del train attuale: {len(selected_indices)}\n")
+        f.write("==== Prime 10 predizioni (predict_proba) ====\n")
+        for i in range(min(10, len(proba_batch))):
+            f.write(f"Sample {i}: {proba_batch[i].tolist()}\n")
+
+        f.write("\n==== Prime 10 entropie ====\n")
+        for i in range(min(10, len(entropy_scores))):
+            f.write(f"Sample {i}: {entropy_scores[i]:.6f}\n")
+
+        f.write("\n==== Top 10 entropie (ordinate) ====\n")
+        top_10_entropy_values = entropy_scores[top_k_idx_in_pool[:10]]
+        for i, score in enumerate(top_10_entropy_values):
+            f.write(f"Rank {i+1}: {score:.6f}\n")
+
+    print(f"[DEBUG] File di debug scritto in: {os.path.abspath(debug_path)}")
+
+    # -------------------------
+    # File 2: ad ogni iterazione salvo
+    # --> train size , pool size
+    # --> entropia min, max, avg      (entropia sul pool)
+    # --> entropia avg per classe     (entropie sul pool)
+    # -------------------------
+    analysis_path = "entropy_analysis.txt"
+    all_labels = np.array(full_df['link_name'].tolist())
+    num_classes = all_labels.shape[1]
+
+    # Analoga a "balanced.." già demo li
+    index_map = {abs_idx: i for i, abs_idx in enumerate(remaining_indices)}
+
+    # Calcolo media entropia per classe, per ogni classe ottiene la lista di indici della classe assoluti (full_df)
+    # ne calcola l'entropia (tramite index_map da cui ottiene indice  relativo) ==> fa la media e lo salva { class_id : media }
+    entropy_per_class = {}
+    for class_id in range(num_classes):
+        class_indices = [i for i in remaining_indices if all_labels[i][class_id] == 1]
+        if class_indices:
+            entropies = [entropy_scores[index_map[i]] for i in class_indices]
+            entropy_per_class[class_id] = round(float(np.mean(entropies)), 6)
+        else:
+            entropy_per_class[class_id] = None  # o 0.0 o "NaN"
+
+    analysis_data = {
+        "train_size": len(selected_indices),
+        "pool_size": len(remaining_indices),
+        "entropy": {
+            "min": round(float(np.min(entropy_scores)), 6),
+            "mean": round(float(np.mean(entropy_scores)), 6),
+            "max": round(float(np.max(entropy_scores)), 6),
+        },
+        "class_entropy_means": entropy_per_class
+    }
+
+    with open(analysis_path, "a") as f:
+        f.write(json.dumps(analysis_data) + "\n")
+
+    print(f"[DEBUG] File di analisi entropia scritto in: {os.path.abspath(analysis_path)}")
+
+
+    return selected_absolute_indices
+
+
+'''
+ La funzione è una estensione di "balanced_sampling_..." in cui sostituisce
+ "   sampled = random.sample(available, n_to_sample)   "  con la logica di selezione
+ per entropia.
+'''
+def balanced_entropy_sampling(full_df, selected_indices, step_size, model, configuration, seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+
+    # Questa parte iniziale analoga a "entropy2"
+    # Creo il pool (indici rimanenti da selezionare)
+    all_labels = np.array(full_df['link_name'].tolist())  # Multi-label (binaria per classe)
+    num_classes = all_labels.shape[1]
+
+    remaining_indices = list(set(range(len(full_df))) - set(selected_indices))
+    remaining_df = full_df.iloc[remaining_indices].reset_index(drop=True)
+
+    # Prepara input (il Pool --> tf del training rimanente)
+    inputs = np.array(remaining_df['Concatenated'].tolist())
+    test_dataset = tf.data.Dataset.from_tensor_slices(inputs).batch(configuration['batch_size'])
+
+    try:    #ottengo probabilità
+        proba_batch = model.predict(test_dataset, verbose=0)
+    except Exception as e:
+        print(f"[ERRORE] durante model.predict: {e}")
+        raise
+
+    proba_batch = np.clip(np.array(proba_batch), 1e-7, 1 - 1e-7)
+    entropy_scores = compute_entropy_of_samples(proba_batch)
+
+    # Creo mappa da indice assoluto (global) → indice relativo (tra i remaining su cui 
+    # calcoliamo l'entropia)  [guarda demo]
+    index_map = {abs_idx: i for i, abs_idx in enumerate(remaining_indices)}
+
+    # Associa a ogni classe i sample disponibili (indici assoluti)  (come nella precedente "balanced..")
+    # per ogni classe id [0,1..] associa la lista di indici che hanno quella classe (all_label[i]=sample_i,all_labels[i][j] --> sample i classe j)
+    # Questo è corretto perchè all_labels è la matrice (sample,classi) creata sopra
+    class_to_available = {
+        class_id: [i for i in remaining_indices if all_labels[i][class_id] == 1] for class_id in range(num_classes)
+    }
+
+    newly_selected = set()          #dobbiamo tenerne traccia
+    active_classes = set(class_to_available.keys())     #uguale
+
+    print(f"[DEBUG] Tentativo di bilanciamento per {step_size} elementi su {num_classes} classi")
+
+    while len(newly_selected) < step_size and active_classes:
+        budget_per_class = max((step_size - len(newly_selected)) // len(active_classes), 1)         #budget di questa it per ogni classe
+        print(f"[DEBUG] Iterazione: {len(newly_selected)}/{step_size} selezionati — budget per classe: {budget_per_class}")
+        to_remove = set()
+
+        for class_id in active_classes:
+            available = list(set(class_to_available[class_id]) - newly_selected)
+
+            if not available:       
+                to_remove.add(class_id)
+                continue
+
+            # Ordina per entropia decrescente usando la index_map  [qui estensione rispetto a "balanced_until.."]
+            # Vedi demo
+            top_entropy = sorted(
+                available,
+                key=lambda i: entropy_scores[index_map[i]],     #index map associa l'indice globale al relativo dei rimainig (perchè la matrice entropy è solo dei remaining)
+                reverse=True
+            )
+
+            selected = top_entropy[:min(len(top_entropy), budget_per_class)]        #seleziono le prime k = min(..)
+            newly_selected.update(selected)
+
+            if len(newly_selected) >= step_size:
+                break
+
+        active_classes -= to_remove
+
+        if not active_classes:
+            print("[DEBUG] Tutte le classi esaurite. Sampling completato in anticipo.")
+            break
+
+    selected_final = list(newly_selected)[:step_size]
+    print(f"[DEBUG] Totale selezionato: {len(selected_final)} elementi")
+    return selected_final
+
+''' DEMO    
+Immaginamo un ts con 10 sample, quindi gli indici totali full_df: [0 1 2 3 4 .. 9]
+
+remaining_indices = list(set(range(10)) - set(selected_indices))
+# Ad esempio: [1, 3, 4, 6, 7, 8, 9]
+
+index_map = {abs_idx: i for i, abs_idx in enumerate(remaining_indices)}
+# Risultato:     
+# {
+#   1: 0,
+#   3: 1,
+#   4: 2,
+#   6: 3,
+#   7: 4,
+#   8: 5,
+#   9: 6  ==> ovvero l'indice 9 globalmente ma posizione 6 in "remaining_indices"
+# }    
+
+Quindi ora:
+top_entropy = sorted(
+                available,
+                key=lambda i: entropy_scores[index_map[i]],
+                reverse=True
+            )
+--> "available" lista di indici available per la classe (tolto gli eventuali newly_selected)
+    [Sono un sottoinsieme dei remaining indices]:
+    Ad esempio   [1,4]
+    La loro entropia è quindi:  Dove i = 1 e i = 4 , 
+        entropy_scores[index_map[i]],
+    index_map[i] ne trova l'indice locale ai RIMANENTI!! in linea con la matrice "entropy_scores" che è calcolato sul training rimanente
+    Ovvero l'entropia dell'indice "1" si trova in realtà in entropy_scores[0] come dice la index_map
+'''
 
 
 
 
 # A partire dal full_df crea il tensore usando solo il sottoinsieme del train che ci interessa
 #   (indici selezionati in precedenza + selezionati ora)
-
 def select_active_subset(full_df, selected_indices, step_size, 
                         sampling_function=random_sampling, seed=42, 
                         model=None, configuration=None):
@@ -268,9 +500,10 @@ def select_active_subset(full_df, selected_indices, step_size,
     #Alla prima iterazione sarà random sampling, dopo quella passata come parametro
     if selected_indices == []:
         new_indices = random_sampling(full_df, selected_indices, step_size, seed)
-    elif sampling_function.__name__ == "entropy_based_sampling":
+    elif sampling_function.__name__ in [ "entropy_based_sampling" , "entropy_based_sampling2", "balanced_entropy_sampling"]:
         assert model is not None and configuration is not None, "Model e configuration sono obbligatori per entropy sampling"
         new_indices = sampling_function(full_df, selected_indices, step_size, model, configuration, seed)
+
     else:
         new_indices = sampling_function(full_df, selected_indices, step_size, seed)
 
