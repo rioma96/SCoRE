@@ -64,6 +64,7 @@ configuration = {'input_shape': 1536,#2304, # 1536,
                  'other_top_perf':[100,200,300],
                  'calibrated':False,
                  'harmonic_score':True,
+                 'cls':False,
                  'q':None
                 }
 
@@ -79,7 +80,7 @@ if configuration['eval_method']=='multi':
 
 
 ## want to extract dataset name from sh command line
-dataset=sys.argv[1]
+dataset='nyt10m'
 print(f'Running on dataset {dataset}')
 
 
@@ -180,7 +181,7 @@ def log_debug(message):
         f.write(message + "\n")
 
 
-from active_learning_utils import select_active_subset,fixed_num_and_random_remaining_sampling, balanced_sampling_until_step_size,random_sampling,entropy_based_sampling
+from active_learning_utils import *
 
 
 train_lenght = len(training_dataset)
@@ -188,9 +189,11 @@ log_debug(f"[DEBUG]  Lunghezza del train di partenza: {train_lenght}")
 max_iters = 40               # Iterazioni di active    
 added_sample_per_iter = train_lenght // max_iters          
 selected_indices = []       #  conterrà gli indici selezionati dall'active  [ad ogni iterazione viene aggiornato]
-sampling_fun=entropy_based_sampling    #fixed...
-sampling_fun_name = "entropy"    #'fixed'  #'balanced'    per salvataggio
+sampling_fun=balanced_entropy_sampling   #fixed...
+sampling_fun_name = "entropy2_balanced"    #'fixed'  #'balanced'    per salvataggio
 
+# "placeHolder" per non far fallire la prima chiamata di "selec.." che cmq non lo usa (è random)
+model = [] 
 
 # Ad ogni iterazione add 1/40 del train_set
 for iteration in range(1, max_iters + 1):
@@ -198,9 +201,7 @@ for iteration in range(1, max_iters + 1):
     process = psutil.Process(os.getpid())
     log_debug(f"[DEBUG] Iter {iteration}: Memory usage: {process.memory_info().rss / 1024 ** 2:.2f} MB")
    
-
-    # "placeHolder" per non far fallire la prima chiamata si "selec.." che cmq non lo usa
-    model = [] 
+    
 
     # Filtro il ds in base all'iterazione  (indici precedenti + selezionati da questa iter)
     # Nota: non perdo mai l'handle al "train_df" originale, invece lo perdo per il tensore, che ricostruisco ad ogni iterazione
@@ -233,57 +234,52 @@ for iteration in range(1, max_iters + 1):
     model.summary()
 
 
+    weights = False
+
+    if weights:
+        model.load_weights("/home/lucamariotti/Documents/CBKGE/Notebooks/wiki20distant_model_0.h5")
+        print("Weights loaded from: ", weights)
+        print("Model loaded from: ", weights)
+    else:
+        print("Model created from scratch")
+        if validation:
+            callback= tf.keras.callbacks.EarlyStopping(
+            monitor='val_loss',
+            min_delta=0,
+            patience=10,
+            verbose=0,
+            mode='auto',
+            baseline=None,
+            restore_best_weights=True,
+            start_from_epoch=0)
 
 
-    if validation:
-        callback= tf.keras.callbacks.EarlyStopping(
-        monitor='val_loss',
-        min_delta=0,
-        patience=10,
-        verbose=0,
-        mode='auto',
-        baseline=None,
-        restore_best_weights=True,
-        start_from_epoch=0)
-
-
-
-
-        history = model.fit(training_dataset.batch(configuration['batch_size']),
-                                                        epochs = configuration['epochs'],
-                                                        validation_data=validation_dataset.batch(configuration['batch_size']),
+            history = model.fit(training_dataset.batch(configuration['batch_size']),
+                                                        epochs = configuration['epochs'], 
+                                                        validation_data=validation_dataset.batch(configuration['batch_size']), 
                                                         callbacks=[callback])
 
-
-    else:
-        callback= tf.keras.callbacks.EarlyStopping(
-        monitor='loss',
-        min_delta=1e-4,
-        patience=10,
-        verbose=0,
-        mode='auto',
-        baseline=None,
-        restore_best_weights=True,
-        start_from_epoch=0)
-
+        else:
+            callback= tf.keras.callbacks.EarlyStopping(
+            monitor='loss',
+            min_delta=1e-4,
+            patience=10,
+            verbose=0,
+            mode='auto',
+            baseline=None,
+            restore_best_weights=True,
+            start_from_epoch=0)
 
 
-
-        history = model.fit(training_dataset.batch(configuration['batch_size']),
-                                epochs = configuration['epochs'],
-                                callbacks=[callback])
-
-
-        #Uncomment if you want save the weights of the model after training
-        #model.save_weights(f'{dataset}_model_{run}.h5')  
+            history = model.fit(training_dataset.batch(configuration['batch_size']),
+                                epochs = configuration['epochs'], 
+                                callbacks=[callback])    
 
 
-
-
+    if not validation:
+        validation_dataset=training_dataset
     list_results=[]
     row_keys=[]
-
-
     for bool_bayesian in [False]:
         for calibrated in [False]:
             for harmonic_score in [True]:
@@ -292,13 +288,13 @@ for iteration in range(1, max_iters + 1):
                 configuration['calibrated']=calibrated
                 configuration['harmonic_score']=harmonic_score
 
-
-                test_y_true, test_y_pred, test_y_score, results_perf, best_indices, test_y_pred_at_R = evaluation_and_performance(test_configuration=configuration,
-                                                                                        training_dataset=training_dataset,
-                                                                                        test_dataset=test_dataset,
-                                                                                        model=model
-                                                                                        )
-                   
+                test_y_true, test_y_pred, test_y_score, results_perf, best_indices, test_y_pred_at_R,  norm_w_batch,test_batch_weight,total_distances,total_indices = evaluation_and_performance(test_configuration=configuration,
+                                                                                                                                                                training_dataset=training_dataset,
+                                                                                                                                                                test_dataset=test_dataset,
+                                                                                                                                                                model=model
+                                                                                                                                                                )
+                
+                
                 if bool_bayesian==True and calibrated==True and harmonic_score==True:
                     print('\n\n RESULT USING CALIBRATED BAYESIAN FORMULATION HARMONIC')
                     row_keys.append('BCH')
@@ -320,7 +316,7 @@ for iteration in range(1, max_iters + 1):
                 elif bool_bayesian==False and calibrated==False and harmonic_score==True:
                     print('\n\n RESULT USING LIKELIHOOD FORMULATION HARMONIC')
                     row_keys.append('LH')
-                else:
+                else: 
                     print('\n\n RESULT USING LIKELIHOOD FORMULATION MEAN')
                     row_keys.append('LM')
                 print('Performance on the whole validation set:\n')
@@ -329,7 +325,6 @@ for iteration in range(1, max_iters + 1):
                         perf=results_perf['total'][key]
                         print(f'{key}: {perf}')
                         row_results.append(perf)
-
 
                 for atX in configuration['other_top_perf']:
                     top_string='@'+str(atX)
@@ -340,7 +335,6 @@ for iteration in range(1, max_iters + 1):
                             print(f'{key}: {perf}')
                             row_results.append(perf)
 
-
                 top_string='@'+str(configuration['top_perf'])
                 print(f'\n\Performance {top_string} on validation set:\n')
                 for key in results_perf[f'@'+str(configuration['top_perf'])]:
@@ -349,128 +343,12 @@ for iteration in range(1, max_iters + 1):
                         print(f'{key}: {perf}')
                         row_results.append(perf)
 
-
                 PatR=precision_at_R_ml(test_y_true, test_y_pred_at_R)
                 print(f'Precision @R: {PatR}')
-                   
+                
                 row_results.append(PatR)
-                row_results.append(configuration['kNN'])
-
-
-                #Calculate correlation matrix and p-value matrix
-
-
-                # Sample one-hot encoded data (replace this with your actual data)
-                one_hot_labels = test_y_true
-
-
-                # Convert the one-hot array to a DataFrame for easier manipulation
-                df = pd.DataFrame(one_hot_labels, columns=link_dict.keys())
-
-
-                # Calculate the correlation matrix and the p-value matrix
-                correlation_matrix_test = df.corr()
-                p_value_matrix = pd.DataFrame(np.zeros(correlation_matrix_test.shape), columns=correlation_matrix_test.columns, index=correlation_matrix_test.index)
-
-
-                for i in range(len(correlation_matrix_test.columns)):
-                    for j in range(len(correlation_matrix_test.columns)):
-                        if i != j:
-                            _, p_value_matrix.iat[i, j] = pearsonr(df.iloc[:, i], df.iloc[:, j])
-
-
-                # Set a significance level
-                alpha = 0.05
-
-
-                # Create a mask for significant correlations
-                significant_mask = p_value_matrix < alpha
-
-
-                #Set diagonal of correlation_matrix_train to value 0
-                np.fill_diagonal(correlation_matrix_test.values, 0.)
-
-
-
-
-                df=pd.DataFrame(np.array(filtered_train_df['link_name'].tolist()), columns=link_dict.keys())
-
-
-                # Calculate the correlation matrix and the p-value matrix
-                correlation_matrix_train = df.corr()
-                p_value_matrix = pd.DataFrame(np.zeros(correlation_matrix_train.shape), columns=correlation_matrix_train.columns, index=correlation_matrix_train.index)
-
-
-                for i in range(len(correlation_matrix_train.columns)):
-                    for j in range(len(correlation_matrix_train.columns)):
-                        if i != j:
-                            _, p_value_matrix.iat[i, j] = pearsonr(df.iloc[:, i], df.iloc[:, j])
-
-
-                # Set a significance level
-                alpha = 0.05
-
-
-                # Create a mask for significant correlations
-                significant_mask = p_value_matrix < alpha
-
-
-                #Set diagonal of correlation_matrix_train to value 0
-                np.fill_diagonal(correlation_matrix_train.values, 0.)
-
-
-                # Sample one-hot encoded data (replace this with your actual data)
-                one_hot_labels = test_y_pred
-
-
-                # Convert the one-hot array to a DataFrame for easier manipulation
-                df = pd.DataFrame(one_hot_labels, columns=link_dict.keys())
-
-
-                # Calculate the correlation matrix and the p-value matrix
-                correlation_matrix_pred = df.corr()
-                p_value_matrix = pd.DataFrame(np.zeros(correlation_matrix_pred.shape), columns=correlation_matrix_pred.columns, index=correlation_matrix_pred.index)
-
-
-                for i in range(len(correlation_matrix_pred.columns)):
-                    for j in range(len(correlation_matrix_pred.columns)):
-                        if i != j:
-                            _, p_value_matrix.iat[i, j] = pearsonr(df.iloc[:, i], df.iloc[:, j])
-
-
-                # Set a significance level
-                alpha = 0.05
-
-
-                # Create a mask for significant correlations
-                significant_mask = p_value_matrix < alpha
-
-
-                #Set diagonal of correlation_matrix_train to value 0
-                np.fill_diagonal(correlation_matrix_pred.values, 0.)
-
-
-
-
-                #Fill nan with zeros in correlation_matrix_pred
-                correlation_matrix_pred=correlation_matrix_pred.fillna(0)
-                correlation_matrix_test=correlation_matrix_test.fillna(0)
-
-
-                distance = np.linalg.norm(correlation_matrix_test - correlation_matrix_pred, 'fro')
-
-
-                row_results.append(distance)
-                row_results.append(configuration['threshold'])
-
-
-                if bool_bayesian==False and calibrated==False and harmonic_score==True:
-                    #Save correlation matrices with dataset name + iteration name as pickle
-                    correlation_matrix_test.to_pickle(f"{dataset}_LH_{iteration}_correlation_matrix_test_{iteration}_KNN_{configuration['kNN']}_threshold_{configuration['threshold']}.pkl")
-
 
                 list_results.append(row_results)
-
 
 
 
@@ -478,7 +356,7 @@ for iteration in range(1, max_iters + 1):
     columns=['micro','Macro']
     for el in configuration['other_top_perf']:
         columns+=[f'm@{el}',f'M@{el}']
-    columns+=['m@1000','M@1000','P@R','KNN','Distance','Threshold']
+    columns+=['m@1000','M@1000','P@R']
     df_res=pd.DataFrame((np.array(list_results)*100).round(2),index=indices,columns=columns)
 
 
