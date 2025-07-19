@@ -165,7 +165,8 @@ if validation:
                                                             quantile_cutoff=configuration['quantile_cutoff_balancing'],
                                                             balance_labels=False,
                                                             cls=False)
-   
+
+
 
 print(train_df.head())
 #    =====================    ACTIVE LEARNING        =========================
@@ -189,11 +190,11 @@ log_debug(f"[DEBUG]  Lunghezza del train di partenza: {train_lenght}")
 max_iters = 40               # Iterazioni di active    
 added_sample_per_iter = train_lenght // max_iters          
 selected_indices = []       #  conterrà gli indici selezionati dall'active  [ad ogni iterazione viene aggiornato]
-sampling_fun=balanced_entropy_sampling   #fixed...
-sampling_fun_name = "entropy2_balanced"    #'fixed'  #'balanced'    per salvataggio
+sampling_fun=entropy_with_EBU   #fixed...
+sampling_fun_name = "entropy_EBU_argmax"    #'fixed'  #'balanced'    per salvataggio
 
 # "placeHolder" per non far fallire la prima chiamata di "selec.." che cmq non lo usa (è random)
-model = [] 
+model = None 
 
 # Ad ogni iterazione add 1/40 del train_set
 for iteration in range(1, max_iters + 1):
@@ -202,7 +203,6 @@ for iteration in range(1, max_iters + 1):
     log_debug(f"[DEBUG] Iter {iteration}: Memory usage: {process.memory_info().rss / 1024 ** 2:.2f} MB")
    
     
-
     # Filtro il ds in base all'iterazione  (indici precedenti + selezionati da questa iter)
     # Nota: non perdo mai l'handle al "train_df" originale, invece lo perdo per il tensore, che ricostruisco ad ogni iterazione
     training_dataset, selected_indices, filtered_train_df = select_active_subset(
@@ -217,16 +217,16 @@ for iteration in range(1, max_iters + 1):
 
 
     # DA QUI IN POI RIMANE INALTERATO
-
+    
 
     buffer_size=len(training_dataset)
-    configuration['val_batch'] = len(training_dataset)
+    configuration['val_batch'] = train_lenght
     training_dataset=training_dataset.shuffle(buffer_size, reshuffle_each_iteration=True)
     test_dataset=test_dataset.shuffle(buffer_size, reshuffle_each_iteration=True)
     if validation:
         validation_dataset=validation_dataset.shuffle(buffer_size, reshuffle_each_iteration=True)
 
-
+   
 
 
     tf.keras.backend.clear_session()
@@ -257,23 +257,7 @@ for iteration in range(1, max_iters + 1):
             history = model.fit(training_dataset.batch(configuration['batch_size']),
                                                         epochs = configuration['epochs'], 
                                                         validation_data=validation_dataset.batch(configuration['batch_size']), 
-                                                        callbacks=[callback])
-
-        else:
-            callback= tf.keras.callbacks.EarlyStopping(
-            monitor='loss',
-            min_delta=1e-4,
-            patience=10,
-            verbose=0,
-            mode='auto',
-            baseline=None,
-            restore_best_weights=True,
-            start_from_epoch=0)
-
-
-            history = model.fit(training_dataset.batch(configuration['batch_size']),
-                                epochs = configuration['epochs'], 
-                                callbacks=[callback])    
+                                                        callbacks=[callback]) 
 
 
     if not validation:
@@ -349,7 +333,6 @@ for iteration in range(1, max_iters + 1):
                 row_results.append(PatR)
 
                 list_results.append(row_results)
-
 
 
     indices=row_keys
