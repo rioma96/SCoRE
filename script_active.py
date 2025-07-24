@@ -223,9 +223,6 @@ log_debug(f"[DEBUG]  Lunghezza del train di partenza: {train_lenght}")
 max_iters = 40              # Iterazioni di active    
 added_sample_per_iter = train_lenght // max_iters          
 
-#DA TOGLIERE !!!!!!!!!!!!!!!!!!!!!!!!!!!!
-max_iters = 3
-added_sample_per_iter = 1000
 
 for seed in seeds:
     print(f"Run con seed:  {seed}")
