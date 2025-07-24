@@ -170,10 +170,45 @@ if validation:
 
 print(train_df.head())
 #    =====================    ACTIVE LEARNING        =========================
-os.makedirs("active_performance", exist_ok=True)            #dove salvo le perf del modello per ogni iter
+import argparse     # Per far funzionare il tutto tramite script
 import random
-seed=42
-random.seed(seed)        
+from active_learning_utils import *
+
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--method', type=str, required=True)
+parser.add_argument('--seeds', nargs='+', type=int, required=True)
+parser.add_argument('--argmin', type=lambda x: x.lower() == 'true', default=True)
+args = parser.parse_args()
+
+method = args.method
+seeds = args.seeds
+argmin = args.argmin
+
+print(f"Seeds: {seeds}")
+
+
+# Mappa dei metodi al sampling
+sampling_dict = {
+    'random_sampling': (random_sampling, 'random_sampling'),
+    'balanced_sampling': (balanced_sampling_until_step_size, 'balanced_random'),
+    'entropy': (entropy_based_sampling, 'entropy'),
+    'balanced_entropy': (balanced_entropy_sampling, 'balanced_entropy'),
+    'entropy_with_EBU_argmin': (entropy_with_EBU, 'entropy_EBU_argmin'),
+    'entropy_with_EBU_argmax': (entropy_with_EBU, 'entropy_EBU_argmax'),
+}
+
+if method not in sampling_dict:
+    raise ValueError(f"Metodo {method} non riconosciuto!")
+
+sampling_fun, sampling_fun_name = sampling_dict[method]
+
+
+
+method_dir = f'performance_{sampling_fun_name}'
+os.makedirs(method_dir, exist_ok=True)
+
 
 
 import psutil   #per debug memoria
@@ -182,172 +217,185 @@ def log_debug(message):
         f.write(message + "\n")
 
 
-from active_learning_utils import *
-
 
 train_lenght = len(training_dataset)
 log_debug(f"[DEBUG]  Lunghezza del train di partenza: {train_lenght}")
-max_iters = 40               # Iterazioni di active    
+max_iters = 40              # Iterazioni di active    
 added_sample_per_iter = train_lenght // max_iters          
-selected_indices = []       #  conterrà gli indici selezionati dall'active  [ad ogni iterazione viene aggiornato]
-sampling_fun=entropy_with_EBU   #fixed...
-sampling_fun_name = "entropy_EBU_argmax"    #'fixed'  #'balanced'    per salvataggio
 
-# "placeHolder" per non far fallire la prima chiamata di "selec.." che cmq non lo usa (è random)
-model = None 
+#DA TOGLIERE !!!!!!!!!!!!!!!!!!!!!!!!!!!!
+max_iters = 3
+added_sample_per_iter = 1000
 
-# Ad ogni iterazione add 1/40 del train_set
-for iteration in range(1, max_iters + 1):
-   
-    process = psutil.Process(os.getpid())
-    log_debug(f"[DEBUG] Iter {iteration}: Memory usage: {process.memory_info().rss / 1024 ** 2:.2f} MB")
-   
+for seed in seeds:
+    print(f"Run con seed:  {seed}")
+
+    # "placeHolder" per non far fallire la prima chiamata di "selec.." che cmq non lo usa (è random)
+    model = None 
+    selected_indices = []     
+
+    random.seed(seed)   
+
+
+    all_iterations_results = []         #qui salvo il dataframe di ogni iterazione
+
+    # Ad ogni iterazione add 1/40 del train_set
+    for iteration in range(1, max_iters + 1):
     
-    # Filtro il ds in base all'iterazione  (indici precedenti + selezionati da questa iter)
-    # Nota: non perdo mai l'handle al "train_df" originale, invece lo perdo per il tensore, che ricostruisco ad ogni iterazione
-    training_dataset, selected_indices, filtered_train_df = select_active_subset(
-                                                                        train_df,
-                                                                        selected_indices,
-                                                                        added_sample_per_iter,
-                                                                        sampling_function = sampling_fun,
-                                                                        model=model,
-                                                                        configuration=configuration
-                                                                    )
-    log_debug(f"[DEBUG] Lunghezza del train all'iterazione {iteration}:{len(training_dataset)}")
-
-
-    # DA QUI IN POI RIMANE INALTERATO
+        process = psutil.Process(os.getpid())
+        #log_debug(f"[DEBUG] Iter {iteration}: Memory usage: {process.memory_info().rss / 1024 ** 2:.2f} MB")
     
+        
+        # Filtro il ds in base all'iterazione  (indici precedenti + selezionati da questa iter)
+        # Nota: non perdo mai l'handle al "train_df" originale, invece lo perdo per il tensore, che ricostruisco ad ogni iterazione
+        training_dataset, selected_indices, filtered_train_df = select_active_subset(
+                                                                            train_df,
+                                                                            selected_indices,
+                                                                            added_sample_per_iter,
+                                                                            sampling_function = sampling_fun,
+                                                                            model=model,
+                                                                            configuration=configuration,
+                                                                            seed=seed,
+                                                                            argmin = argmin
+                                                                            )                                                                    
+        log_debug(f"[DEBUG] Lunghezza del train all'iterazione {iteration}:{len(training_dataset)}")
 
-    buffer_size=len(training_dataset)
-    configuration['val_batch'] = train_lenght
-    training_dataset=training_dataset.shuffle(buffer_size, reshuffle_each_iteration=True)
-    test_dataset=test_dataset.shuffle(buffer_size, reshuffle_each_iteration=True)
-    if validation:
-        validation_dataset=validation_dataset.shuffle(buffer_size, reshuffle_each_iteration=True)
 
-   
+        # DA QUI IN POI RIMANE INALTERATO
+        
 
+        buffer_size=len(training_dataset)
+        configuration['val_batch'] = train_lenght
 
-    tf.keras.backend.clear_session()
-    model = CreateModel(training_configuration = configuration)
-    model.summary()
-
-
-    weights = False
-
-    if weights:
-        model.load_weights("/home/lucamariotti/Documents/CBKGE/Notebooks/wiki20distant_model_0.h5")
-        print("Weights loaded from: ", weights)
-        print("Model loaded from: ", weights)
-    else:
-        print("Model created from scratch")
+        #aggiungi seed
+        training_dataset=training_dataset.shuffle(buffer_size, reshuffle_each_iteration=True, seed = seed)
+        test_dataset=test_dataset.shuffle(buffer_size, reshuffle_each_iteration=True)
         if validation:
-            callback= tf.keras.callbacks.EarlyStopping(
-            monitor='val_loss',
-            min_delta=0,
-            patience=10,
-            verbose=0,
-            mode='auto',
-            baseline=None,
-            restore_best_weights=True,
-            start_from_epoch=0)
+            validation_dataset=validation_dataset.shuffle(buffer_size, reshuffle_each_iteration=True)
+
+    
 
 
-            history = model.fit(training_dataset.batch(configuration['batch_size']),
-                                                        epochs = configuration['epochs'], 
-                                                        validation_data=validation_dataset.batch(configuration['batch_size']), 
-                                                        callbacks=[callback]) 
+        tf.keras.backend.clear_session()
+        model = CreateModel(training_configuration = configuration)
+        model.summary()
 
 
-    if not validation:
-        validation_dataset=training_dataset
-    list_results=[]
-    row_keys=[]
-    for bool_bayesian in [False]:
-        for calibrated in [False]:
-            for harmonic_score in [True]:
-                row_results=[]
-                configuration['get_thresholds']=bool_bayesian
-                configuration['calibrated']=calibrated
-                configuration['harmonic_score']=harmonic_score
+        weights = False
 
-                test_y_true, test_y_pred, test_y_score, results_perf, best_indices, test_y_pred_at_R,  norm_w_batch,test_batch_weight,total_distances,total_indices = evaluation_and_performance(test_configuration=configuration,
-                                                                                                                                                                training_dataset=training_dataset,
-                                                                                                                                                                test_dataset=test_dataset,
-                                                                                                                                                                model=model
-                                                                                                                                                                )
-                
-                
-                if bool_bayesian==True and calibrated==True and harmonic_score==True:
-                    print('\n\n RESULT USING CALIBRATED BAYESIAN FORMULATION HARMONIC')
-                    row_keys.append('BCH')
-                elif bool_bayesian==True and calibrated==True and harmonic_score==False:
-                    print('\n\n RESULT USING CALIBRATED BAYESIAN FORMULATION MEAN')
-                    row_keys.append('BCM')
-                elif bool_bayesian==True and calibrated==False and harmonic_score==True:
-                    print('\n\n RESULT USING BAYESIAN FORMULATION HARMONIC')
-                    row_keys.append('BH')
-                elif bool_bayesian==True and calibrated==False and harmonic_score==False:
-                    print('\n\n RESULT USING BAYESIAN FORMULATION MEAN')
-                    row_keys.append('BM')
-                elif bool_bayesian==False and calibrated==True and harmonic_score==True:
-                    print('\n\n RESULT USING CALIBRATED LIKELIHOOD FORMULATION HARMONIC')
-                    row_keys.append('LCH')
-                elif bool_bayesian==False and calibrated==True and harmonic_score==False:
-                    print('\n\n RESULT USING CALIBRATED LIKELIHOOD FORMULATION MEAN')
-                    row_keys.append('LCM')
-                elif bool_bayesian==False and calibrated==False and harmonic_score==True:
-                    print('\n\n RESULT USING LIKELIHOOD FORMULATION HARMONIC')
-                    row_keys.append('LH')
-                else: 
-                    print('\n\n RESULT USING LIKELIHOOD FORMULATION MEAN')
-                    row_keys.append('LM')
-                print('Performance on the whole validation set:\n')
-                for key in results_perf['total']:
-                    if key!='list_f1':
-                        perf=results_perf['total'][key]
-                        print(f'{key}: {perf}')
-                        row_results.append(perf)
+        if weights:
+            model.load_weights("/home/lucamariotti/Documents/CBKGE/Notebooks/wiki20distant_model_0.h5")
+            print("Weights loaded from: ", weights)
+            print("Model loaded from: ", weights)
+        else:
+            print("Model created from scratch")
+            if validation:
+                callback= tf.keras.callbacks.EarlyStopping(
+                monitor='val_loss',
+                min_delta=0,
+                patience=10,
+                verbose=0,
+                mode='auto',
+                baseline=None,
+                restore_best_weights=True,
+                start_from_epoch=0)
 
-                for atX in configuration['other_top_perf']:
-                    top_string='@'+str(atX)
-                    print(f'\n\Performance {top_string} on validation set:\n')
-                    for key in results_perf[f'@'+str(atX)]:
+
+                history = model.fit(training_dataset.batch(configuration['batch_size']),
+                                                            epochs = configuration['epochs'], 
+                                                            validation_data=validation_dataset.batch(configuration['batch_size']), 
+                                                            callbacks=[callback]) 
+
+
+        if not validation:
+            validation_dataset=training_dataset
+        list_results=[]
+        row_keys=[]
+        for bool_bayesian in [False]:
+            for calibrated in [False]:
+                for harmonic_score in [True]:
+                    row_results=[]
+                    configuration['get_thresholds']=bool_bayesian
+                    configuration['calibrated']=calibrated
+                    configuration['harmonic_score']=harmonic_score
+
+                    test_y_true, test_y_pred, test_y_score, results_perf, best_indices, test_y_pred_at_R,  norm_w_batch,test_batch_weight,total_distances,total_indices = evaluation_and_performance(test_configuration=configuration,
+                                                                                                                                                                    training_dataset=training_dataset,
+                                                                                                                                                                    test_dataset=test_dataset,
+                                                                                                                                                                    model=model
+                                                                                                                                                                    )
+                    
+                    
+                    if bool_bayesian==True and calibrated==True and harmonic_score==True:
+                        print('\n\n RESULT USING CALIBRATED BAYESIAN FORMULATION HARMONIC')
+                        row_keys.append('BCH')
+                    elif bool_bayesian==True and calibrated==True and harmonic_score==False:
+                        print('\n\n RESULT USING CALIBRATED BAYESIAN FORMULATION MEAN')
+                        row_keys.append('BCM')
+                    elif bool_bayesian==True and calibrated==False and harmonic_score==True:
+                        print('\n\n RESULT USING BAYESIAN FORMULATION HARMONIC')
+                        row_keys.append('BH')
+                    elif bool_bayesian==True and calibrated==False and harmonic_score==False:
+                        print('\n\n RESULT USING BAYESIAN FORMULATION MEAN')
+                        row_keys.append('BM')
+                    elif bool_bayesian==False and calibrated==True and harmonic_score==True:
+                        print('\n\n RESULT USING CALIBRATED LIKELIHOOD FORMULATION HARMONIC')
+                        row_keys.append('LCH')
+                    elif bool_bayesian==False and calibrated==True and harmonic_score==False:
+                        print('\n\n RESULT USING CALIBRATED LIKELIHOOD FORMULATION MEAN')
+                        row_keys.append('LCM')
+                    elif bool_bayesian==False and calibrated==False and harmonic_score==True:
+                        print('\n\n RESULT USING LIKELIHOOD FORMULATION HARMONIC')
+                        row_keys.append('LH')
+                    else: 
+                        print('\n\n RESULT USING LIKELIHOOD FORMULATION MEAN')
+                        row_keys.append('LM')
+                    print('Performance on the whole validation set:\n')
+                    for key in results_perf['total']:
                         if key!='list_f1':
-                            perf=results_perf[f'@'+str(atX)][key]
+                            perf=results_perf['total'][key]
                             print(f'{key}: {perf}')
                             row_results.append(perf)
 
-                top_string='@'+str(configuration['top_perf'])
-                print(f'\n\Performance {top_string} on validation set:\n')
-                for key in results_perf[f'@'+str(configuration['top_perf'])]:
-                    if key!='list_f1':
-                        perf=results_perf[f'@'+str(configuration['top_perf'])][key]
-                        print(f'{key}: {perf}')
-                        row_results.append(perf)
+                    for atX in configuration['other_top_perf']:
+                        top_string='@'+str(atX)
+                        print(f'\n\Performance {top_string} on validation set:\n')
+                        for key in results_perf[f'@'+str(atX)]:
+                            if key!='list_f1':
+                                perf=results_perf[f'@'+str(atX)][key]
+                                print(f'{key}: {perf}')
+                                row_results.append(perf)
 
-                PatR=precision_at_R_ml(test_y_true, test_y_pred_at_R)
-                print(f'Precision @R: {PatR}')
-                
-                row_results.append(PatR)
+                    top_string='@'+str(configuration['top_perf'])
+                    print(f'\n\Performance {top_string} on validation set:\n')
+                    for key in results_perf[f'@'+str(configuration['top_perf'])]:
+                        if key!='list_f1':
+                            perf=results_perf[f'@'+str(configuration['top_perf'])][key]
+                            print(f'{key}: {perf}')
+                            row_results.append(perf)
 
-                list_results.append(row_results)
+                    PatR=precision_at_R_ml(test_y_true, test_y_pred_at_R)
+                    print(f'Precision @R: {PatR}')
+                    
+                    row_results.append(PatR)
 
-
-    indices=row_keys
-    columns=['micro','Macro']
-    for el in configuration['other_top_perf']:
-        columns+=[f'm@{el}',f'M@{el}']
-    columns+=['m@1000','M@1000','P@R']
-    df_res=pd.DataFrame((np.array(list_results)*100).round(2),index=indices,columns=columns)
-
-
+                    list_results.append(row_results)
 
 
-    #Salvo le perf ad ogni iterazione
-    if sampling_fun:
-        df_res.to_pickle(f'active_performance/{dataset}_active_results_iteration_{iteration}_with_{sampling_fun_name}.pkl')
-    else:
-        df_res.to_pickle(f'active_performance/{dataset}_active_results_iteration_{iteration}.pkl')
+        indices=row_keys
+        columns=['micro','Macro']
+        for el in configuration['other_top_perf']:
+            columns+=[f'm@{el}',f'M@{el}']
+        columns+=['m@1000','M@1000','P@R']
+        df_res=pd.DataFrame((np.array(list_results)*100).round(2),index=indices,columns=columns)
+
+
+        #Dovrebbe sempre entrare qui
+        if sampling_fun:
+            all_iterations_results.append(df_res)
+
+    with open(os.path.join(method_dir, f'performance_seed_{seed}.pkl'), 'wb') as f:
+        pickle.dump(all_iterations_results, f)
+
+     
 

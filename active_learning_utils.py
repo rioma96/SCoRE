@@ -279,7 +279,7 @@ def entropy_based_sampling(full_df, selected_indices, step_size, model, configur
         # --> entropia min, max, avg      (entropia sul pool)
         # --> entropia avg per classe     (entropie sul pool)
         # -------------------------
-        analysis_path = "entropy_analysis.txt"
+        analysis_path = f"entropy_analysis_{seed}.txt"
         all_labels = np.array(full_df['link_name'].tolist())
         num_classes = all_labels.shape[1]
 
@@ -467,7 +467,7 @@ top_entropy = sorted(
 # EBU --> riprende esattamente il codice dell'entropia ma:
 #   - seleziona i candidati:  top step_size*mul entropici
 #   - tra questi seleziona secondo EBU (necessita binarizzazione del pool --> fatta tramite model.predict)
-def entropy_with_EBU(full_df, selected_indices, step_size, model, configuration, seed=42, mul=5):
+def entropy_with_EBU(full_df, selected_indices, step_size, model, configuration, seed=42, mul=5, argmin = True):
 
     remaining_indices = list(set(range(len(full_df))) - set(selected_indices))
     remaining_df = full_df.iloc[remaining_indices].reset_index(drop=True)
@@ -507,6 +507,7 @@ def entropy_with_EBU(full_df, selected_indices, step_size, model, configuration,
     print(f"DEBUG: shape pool_bin {test_dataset_bin.shape}")
     print(f"DEBUG: shape test_y_pred {y_pred.shape}")
     
+    '''
     print("\n[DEBUG] Prime 10 righe di test_dataset_bin (binarizzate da predict > 0):")
     for i in range(min(10, len(test_dataset_bin))):
         print(f"Sample {i}: {test_dataset_bin[i].tolist()}")
@@ -517,9 +518,8 @@ def entropy_with_EBU(full_df, selected_indices, step_size, model, configuration,
 
     print("\n[DEBUG] Prime 10 righe di norm w batch:")
     for i in range(min(10, len(norm_w_batch[0]))):
-        print(f"Sample {i}: {norm_w_batch[0][i].tolist()}")
+        print(f"Sample {i}: {norm_w_batch[0][i].tolist()}") '''
 
-    argmin=True             #False se vuoi "argmax" <-- consulta paper
     final_indices = select_by_ebu_multilabel(
                                     test_dataset_bin,
                                     top_k_idx_in_pool,
@@ -538,16 +538,21 @@ def entropy_with_EBU(full_df, selected_indices, step_size, model, configuration,
 
 # A partire dal full_df crea il tensore usando solo il sottoinsieme del train che ci interessa
 #   (indici selezionati in precedenza + selezionati ora)
+#  argmin parametro dell'ebu
 def select_active_subset(full_df, selected_indices, step_size, 
                         sampling_function=random_sampling, seed=42, 
-                        model=None, configuration=None):
+                        model=None, configuration=None,argmin=True):        
     
     #Alla prima iterazione sarà random sampling, dopo quella passata come parametro
     if selected_indices == []:
         new_indices = random_sampling(full_df, selected_indices, step_size, seed)
-    elif sampling_function.__name__ in [ "entropy_based_sampling" , "entropy_based_sampling2", "balanced_entropy_sampling", "entropy_with_EBU"]:
+    elif sampling_function.__name__ in [ "entropy_based_sampling" ,  "balanced_entropy_sampling"]:
         assert model is not None and configuration is not None, "Model e configuration sono obbligatori per entropy sampling"
         new_indices = sampling_function(full_df, selected_indices, step_size, model, configuration, seed)
+
+    elif sampling_function.__name__ in [ "entropy_with_EBU"]:
+        assert model is not None and configuration is not None, "Model e configuration sono obbligatori per entropy sampling"
+        new_indices = sampling_function(full_df, selected_indices, step_size, model, configuration, seed,argmin)
 
     else:
         new_indices = sampling_function(full_df, selected_indices, step_size, seed)
