@@ -4,6 +4,7 @@ import tensorflow as tf
 from CBKGE.utilities_validation import evaluation_and_performance
 import json
 from active_learning_utils_ebu import *
+import os
 
 
 
@@ -254,7 +255,6 @@ def entropy_based_sampling(full_df, selected_indices, step_size, model, configur
         # - 1° file   ( test funzionamento)
         # - 2° file  (analisi dei valori dell'entropia)
         # ---------------------
-        import os
         debug_path = "debug_entropy.txt"
         with open(debug_path, "a") as f:
             f.write(f"\n\nGrandezza del train attuale: {len(selected_indices)}\n")
@@ -278,41 +278,66 @@ def entropy_based_sampling(full_df, selected_indices, step_size, model, configur
         # --> train size , pool size
         # --> entropia min, max, avg      (entropia sul pool)
         # --> entropia avg per classe     (entropie sul pool)
-        # -------------------------
-        analysis_path = f"entropy_analysis_{seed}.txt"
-        all_labels = np.array(full_df['link_name'].tolist())
-        num_classes = all_labels.shape[1]
+        # --> analisi su num label per classe (media sul pool)
 
-        # Analoga a "balanced.." già demo li
-        index_map = {abs_idx: i for i, abs_idx in enumerate(remaining_indices)}
+    analysis_dir = "entropy_analysis"
+    os.makedirs(analysis_dir, exist_ok=True)
+    
+    entropy_analysis_path = os.path.join(analysis_dir, f"entropy_analysis_{seed}.txt")
+    label_count_analysis_path = os.path.join(analysis_dir, f"class_label_entropy_analysis_{seed}.txt")
 
-        # Calcolo media entropia per classe, per ogni classe ottiene la lista di indici della classe assoluti (full_df)
-        # ne calcola l'entropia (tramite index_map da cui ottiene indice  relativo) ==> fa la media e lo salva { class_id : media }
-        entropy_per_class = {}
-        for class_id in range(num_classes):
-            class_indices = [i for i in remaining_indices if all_labels[i][class_id] == 1]
-            if class_indices:
-                entropies = [entropy_scores[index_map[i]] for i in class_indices]
-                entropy_per_class[class_id] = round(float(np.mean(entropies)), 6)
-            else:
-                entropy_per_class[class_id] = None  # o 0.0 o "NaN"
 
-        analysis_data = {
-            "train_size": len(selected_indices),
-            "pool_size": len(remaining_indices),
-            "entropy": {
-                "min": round(float(np.min(entropy_scores)), 6),
-                "mean": round(float(np.mean(entropy_scores)), 6),
-                "max": round(float(np.max(entropy_scores)), 6),
-            },
-            "class_entropy_means": entropy_per_class
-        }
+    all_labels = np.array(full_df['link_name'].tolist())  # shape: (N_total_samples, num_classes)
+    num_classes = all_labels.shape[1]
 
-        with open(analysis_path, "a") as f:
-            f.write(json.dumps(analysis_data) + "\n")
+    # Mappa: da indice assoluto a relativo (usato su entropy_scores)
+    index_map = {abs_idx: i for i, abs_idx in enumerate(remaining_indices)}
 
-        print(f"[DEBUG] File di analisi entropia scritto in: {os.path.abspath(analysis_path)}")
-    #--------------------------- salvo info sull'entropia
+    # Calcolo media entropia per classe, per ogni classe ottiene la lista di indici della classe assoluti (full_df)
+    # ne calcola l'entropia (tramite index_map da cui ottiene indice  relativo) ==> fa la media e lo salva { class_id : media }
+    entropy_per_class = {}
+    for class_id in range(num_classes):
+        class_indices = [i for i in remaining_indices if all_labels[i][class_id] == 1]
+        if class_indices:
+            entropies = [entropy_scores[index_map[i]] for i in class_indices]
+            entropy_per_class[class_id] = round(float(np.mean(entropies)), 6)
+        else:
+            entropy_per_class[class_id] = None  # oppure 0.0
+
+    analysis_data = {
+        "train_size": len(selected_indices),
+        "pool_size": len(remaining_indices),
+        "entropy": {
+            "min": round(float(np.min(entropy_scores)), 6),
+            "mean": round(float(np.mean(entropy_scores)), 6),
+            "max": round(float(np.max(entropy_scores)), 6),
+        },
+        "class_entropy_means": entropy_per_class
+    }
+
+    # === Salvataggio file entropia (come prima)
+    with open(entropy_analysis_path, "a") as f:
+        f.write(json.dumps(analysis_data) + "\n")
+
+    # === NUOVO: Calcolo numero medio di label per i sample della classe
+    class_avg_labels_per_sample = []
+
+    for class_id in range(num_classes):
+        class_indices = [i for i in remaining_indices if all_labels[i][class_id] == 1]
+        if class_indices:
+            label_counts = [np.sum(all_labels[i]) for i in class_indices]  # quante label ha ogni sample
+            avg_labels = round(float(np.mean(label_counts)), 2)             # media con tronc a 2 valori
+        else:
+            avg_labels = -1.0  
+        class_avg_labels_per_sample.append(avg_labels)
+
+    # === Salvataggio riga in file .txt
+    with open(label_count_analysis_path, "a") as f:
+        line = " ".join(str(val) for val in class_avg_labels_per_sample)
+        f.write(line + "\n")
+
+    print(f"[DEBUG] Salvato anche file media label per classe in: {os.path.abspath(label_count_analysis_path)}")
+
 
     return selected_absolute_indices
 
