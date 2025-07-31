@@ -167,8 +167,8 @@ if validation:
                                                             cls=False)
 
 
-
-print(train_df.head())
+print("----------------------------------------------------------------------------")
+print(len(train_df))
 #    =====================    ACTIVE LEARNING        =========================
 import argparse     # Per far funzionare il tutto tramite script
 import random
@@ -220,11 +220,16 @@ def log_debug(message):
 
 train_lenght = len(training_dataset)
 log_debug(f"[DEBUG]  Lunghezza del train di partenza: {train_lenght}")
-max_iters = 40              # Iterazioni di active    
-added_sample_per_iter = train_lenght // max_iters          
+max_iters = 40            # Iterazioni di active    
+added_sample_per_iter = train_lenght // max_iters   
+
+
+#max_iters = 3
+#added_sample_per_iter = 1000
 
 
 for seed in seeds:
+    tf.random.set_seed(seed)
     print(f"Run con seed:  {seed}")
 
     # "placeHolder" per non far fallire la prima chiamata di "selec.." che cmq non lo usa (è random)
