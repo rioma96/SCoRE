@@ -204,7 +204,7 @@ def compute_entropy_of_samples(p_test):
 
 # La funzione calcolo l'entropia per ogni sample del pool (train rimanente) e prende i top_step_size
 # incerti (>entropy)
-def entropy_based_sampling(full_df, selected_indices, step_size, model, configuration, seed=42):
+def entropy_based_sampling(full_df, selected_indices, step_size, model, configuration, test ,seed=42):
 
     random.seed(seed)
     np.random.seed(seed)
@@ -274,35 +274,72 @@ def entropy_based_sampling(full_df, selected_indices, step_size, model, configur
         print(f"[DEBUG] File di debug scritto in: {os.path.abspath(debug_path)}")
 
         # -------------------------
-        # File 2: ad ogni iterazione salvo
-        # --> train size , pool size
-        # --> entropia min, max, avg      (entropia sul pool)
-        # --> entropia avg per classe     (entropie sul pool)
-        # --> analisi su num label per classe (media sul pool)
+        # Due file: ogni iterazione salvo
+        # --> train size , pool size  CAMBIA SU TEST!
+        # --> entropia min, max, avg      (entropia sul test)
+        # --> entropia avg per classe     (entropie sul test)
+        # --> analisi su num label per classe (media sul test)
+
+    print(test)
+
+    # 1. Estrai input e label da test (che è un tf.data.Dataset)
+    all_inputs = []
+    all_labels = []
+
+    for x, y in test:
+        all_inputs.append(x.numpy())
+        all_labels.append(y.numpy())
+    
+    print("\n\n\nDEBUG\n\n")
+    print(len(all_inputs))  # (num_samples, 1536)
+    print(len(all_labels))  # (num_samples, 24)
+
+    # 2. Converti in array NumPy (come fai con 'selected_df')
+    inputs_test = np.stack(all_inputs, axis=0)
+    labels_test = np.stack(all_labels, axis=0)
+
+    # 3. Ricrea il dataset "normale"
+    test = tf.data.Dataset.from_tensor_slices((inputs_test, labels_test))
+
+
+
+    _, _, _, _, _, _, norm_w_batch, _, _ , _= evaluation_and_performance(
+        test_configuration=configuration,
+        training_dataset=training_dataset,
+        test_dataset=test,
+        model=model
+    )
+    print(f"[DEBUG] Shape di norm_w_batch per debug (quindi del vero test_df) {norm_w_batch[0].shape}")  
+
+    norm_w_batch = np.array(norm_w_batch)
+    entropy_scores = compute_entropy_of_samples(norm_w_batch[0])
 
     analysis_dir = "entropy_analysis"
     os.makedirs(analysis_dir, exist_ok=True)
     
     entropy_analysis_path = os.path.join(analysis_dir, f"entropy_analysis_{seed}.txt")
-    label_count_analysis_path = os.path.join(analysis_dir, f"class_label_entropy_analysis_{seed}.txt")
+    #label_count_analysis_path = os.path.join(analysis_dir, f"class_label_entropy_analysis_{seed}.txt")
+
+    # === Per analizzare entropie sul vero test set (ora è di tipo tensor flow shuffle dataset devo cambiarlo) ===
+    # Estrae tutti i label (secondo elemento della tupla) dal test dataset
 
 
-    all_labels = np.array(full_df['link_name'].tolist())  # shape: (N_total_samples, num_classes)
+    all_labels = np.array(test['link_name'].tolist())  
+
+    all_labels = np.concatenate(all_labels, axis=0)  # (num_sample, num_class)
+    print(f"SHAPE DI all_labels {all_labels.shape}" )
     num_classes = all_labels.shape[1]
 
-    # Mappa: da indice assoluto a relativo (usato su entropy_scores)
-    index_map = {abs_idx: i for i, abs_idx in enumerate(remaining_indices)}
-
-    # Calcolo media entropia per classe, per ogni classe ottiene la lista di indici della classe assoluti (full_df)
-    # ne calcola l'entropia (tramite index_map da cui ottiene indice  relativo) ==> fa la media e lo salva { class_id : media }
+    #per ogni classe prende il sottoinsieme di sample che contiene quella classe e ne fa la media
     entropy_per_class = {}
     for class_id in range(num_classes):
-        class_indices = [i for i in remaining_indices if all_labels[i][class_id] == 1]
+        class_indices = [i for i in range(len(all_labels)) if all_labels[i][class_id] == 1]
         if class_indices:
-            entropies = [entropy_scores[index_map[i]] for i in class_indices]
+            entropies = [entropy_scores[i] for i in class_indices]
             entropy_per_class[class_id] = round(float(np.mean(entropies)), 6)
         else:
-            entropy_per_class[class_id] = None  # oppure 0.0
+            entropy_per_class[class_id] = None
+
 
     analysis_data = {
         "train_size": len(selected_indices),
@@ -319,6 +356,7 @@ def entropy_based_sampling(full_df, selected_indices, step_size, model, configur
     with open(entropy_analysis_path, "a") as f:
         f.write(json.dumps(analysis_data) + "\n")
 
+    '''
     # === NUOVO: Calcolo numero medio di label per i sample della classe
     class_avg_labels_per_sample = []
 
@@ -337,7 +375,7 @@ def entropy_based_sampling(full_df, selected_indices, step_size, model, configur
         f.write(line + "\n")
 
     print(f"[DEBUG] Salvato anche file media label per classe in: {os.path.abspath(label_count_analysis_path)}")
-
+    '''
 
     return selected_absolute_indices
 
@@ -566,17 +604,22 @@ def entropy_with_EBU(full_df, selected_indices, step_size, model, configuration,
 #  argmin parametro dell'ebu
 def select_active_subset(full_df, selected_indices, step_size, 
                         sampling_function=random_sampling, seed=42, 
-                        model=None, configuration=None,argmin=True):        
+                        model=None, configuration=None,argmin=True ,test=None):        
     
     #Alla prima iterazione sarà random sampling, dopo quella passata come parametro
     if selected_indices == []:
         new_indices = random_sampling(full_df, selected_indices, step_size, seed)
-    elif sampling_function.__name__ in [ "entropy_based_sampling" ,  "balanced_entropy_sampling"]:
-        assert model is not None and configuration is not None, "Model e configuration sono obbligatori per entropy sampling"
+
+    elif  sampling_function.__name__ in [ "entropy_based_sampling"]:
+        assert model is not None and configuration is not None and test is not None, "Model e configuration e test sono obbligatori per entropy sampling"
+        new_indices = sampling_function(full_df, selected_indices, step_size, model, configuration, test,seed)
+
+    elif sampling_function.__name__ in [  "balanced_entropy_sampling"]:
+        assert model is not None and configuration is not None, "Model e configuration sono obbligatori per balanced entropy sampling"
         new_indices = sampling_function(full_df, selected_indices, step_size, model, configuration, seed)
 
     elif sampling_function.__name__ in [ "entropy_with_EBU"]:
-        assert model is not None and configuration is not None, "Model e configuration sono obbligatori per entropy sampling"
+        assert model is not None and configuration is not None, "Model e configuration sono obbligatori per Ebu"
         new_indices = sampling_function(full_df, selected_indices, step_size, model, configuration, seed,argmin)
 
     else:

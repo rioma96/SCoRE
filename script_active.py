@@ -27,6 +27,38 @@ from CBKGE.utilities_validation import *
 
 
 
+def significant_correlation_matrix(one_hot_labels, link_dict, alpha=0.05):
+    """
+    Plots a heatmap of significant correlations between classes.
+
+    Parameters:
+    - one_hot_labels: array-like, shape (n_samples, n_classes)
+      One-hot encoded labels.
+    - link_dict: dict
+      Dictionary with class names as keys.
+    - alpha: float, optional (default=0.05)
+      Significance level for correlations.
+    """
+    # Convert the one-hot array to a DataFrame for easier manipulation
+    df = pd.DataFrame(one_hot_labels, columns=link_dict.keys())
+
+    # Calculate the correlation matrix and the p-value matrix
+    correlation_matrix = df.corr()
+    p_value_matrix = pd.DataFrame(np.zeros(correlation_matrix.shape), columns=correlation_matrix.columns, index=correlation_matrix.index)
+
+    for i in range(len(correlation_matrix.columns)):
+        for j in range(len(correlation_matrix.columns)):
+            if i != j:
+                _, p_value_matrix.iat[i, j] = pearsonr(df.iloc[:, i], df.iloc[:, j])
+
+    # Create a mask for significant correlations
+    significant_mask = p_value_matrix < alpha
+    # Set diagonal of correlation_matrix_test to value 0
+    np.fill_diagonal(correlation_matrix.values, 0.)
+    return correlation_matrix, significant_mask
+
+
+
 
 
 configuration = {'input_shape': 1536,#2304, # 1536,
@@ -224,19 +256,21 @@ max_iters = 40            # Iterazioni di active
 added_sample_per_iter = train_lenght // max_iters   
 
 
-#max_iters = 3
-#added_sample_per_iter = 1000
+max_iters = 2
+added_sample_per_iter = 1000
 
 
 for seed in seeds:
-    tf.random.set_seed(seed)
     print(f"Run con seed:  {seed}")
 
     # "placeHolder" per non far fallire la prima chiamata di "selec.." che cmq non lo usa (è random)
     model = None 
     selected_indices = []     
 
+      
+    
     random.seed(seed)   
+    tf.random.set_seed(seed) 
 
 
     all_iterations_results = []         #qui salvo il dataframe di ogni iterazione
@@ -258,7 +292,8 @@ for seed in seeds:
                                                                             model=model,
                                                                             configuration=configuration,
                                                                             seed=seed,
-                                                                            argmin = argmin
+                                                                            argmin = argmin,
+                                                                            test=test_dataset
                                                                             )                                                                    
         log_debug(f"[DEBUG] Lunghezza del train all'iterazione {iteration}:{len(training_dataset)}")
 
@@ -269,9 +304,10 @@ for seed in seeds:
         buffer_size=len(training_dataset)
         configuration['val_batch'] = train_lenght
 
-        #aggiungi seed
         training_dataset=training_dataset.shuffle(buffer_size, reshuffle_each_iteration=True, seed = seed)
-        test_dataset=test_dataset.shuffle(buffer_size, reshuffle_each_iteration=True)
+        test_dataset=test_dataset.shuffle(buffer_size, reshuffle_each_iteration=True,seed=seed)
+
+
         if validation:
             validation_dataset=validation_dataset.shuffle(buffer_size, reshuffle_each_iteration=True)
 
@@ -311,8 +347,10 @@ for seed in seeds:
 
         if not validation:
             validation_dataset=training_dataset
+            
         list_results=[]
         row_keys=[]
+        
         for bool_bayesian in [False]:
             for calibrated in [False]:
                 for harmonic_score in [True]:
@@ -321,12 +359,11 @@ for seed in seeds:
                     configuration['calibrated']=calibrated
                     configuration['harmonic_score']=harmonic_score
 
-                    test_y_true, test_y_pred, test_y_score, results_perf, best_indices, test_y_pred_at_R,  norm_w_batch,test_batch_weight,total_distances,total_indices = evaluation_and_performance(test_configuration=configuration,
-                                                                                                                                                                    training_dataset=training_dataset,
-                                                                                                                                                                    test_dataset=test_dataset,
-                                                                                                                                                                    model=model
-                                                                                                                                                                    )
-                    
+                    test_y_true, test_y_pred, test_y_score, results_perf, best_indices, test_y_pred_at_R, _, _, _, _ = evaluation_and_performance(test_configuration=configuration,
+                                                                                        training_dataset=training_dataset,
+                                                                                        test_dataset=test_dataset,
+                                                                                        model=model
+                                                                                        )
                     
                     if bool_bayesian==True and calibrated==True and harmonic_score==True:
                         print('\n\n RESULT USING CALIBRATED BAYESIAN FORMULATION HARMONIC')
@@ -380,6 +417,105 @@ for seed in seeds:
                     print(f'Precision @R: {PatR}')
                     
                     row_results.append(PatR)
+                    row_results.append(configuration['kNN'])
+
+                    #Calculate correlation matrix and p-value matrix
+
+                    # Sample one-hot encoded data (replace this with your actual data)
+                    one_hot_labels = test_y_true
+
+                    # Convert the one-hot array to a DataFrame for easier manipulation
+                    df = pd.DataFrame(one_hot_labels, columns=link_dict.keys())
+
+                    # Calculate the correlation matrix and the p-value matrix
+                    correlation_matrix_test = df.corr()
+                    p_value_matrix = pd.DataFrame(np.zeros(correlation_matrix_test.shape), columns=correlation_matrix_test.columns, index=correlation_matrix_test.index)
+
+                    for i in range(len(correlation_matrix_test.columns)):
+                        for j in range(len(correlation_matrix_test.columns)):
+                            if i != j:
+                                _, p_value_matrix.iat[i, j] = pearsonr(df.iloc[:, i], df.iloc[:, j])
+
+                    # Set a significance level
+                    alpha = 0.05
+
+                    # Create a mask for significant correlations
+                    significant_mask = p_value_matrix < alpha
+
+                    #Set diagonal of correlation_matrix_train to value 0
+                    np.fill_diagonal(correlation_matrix_test.values, 0.)
+
+
+                    df=pd.DataFrame(np.array(train_df['link_name'].tolist()), columns=link_dict.keys())
+
+                    # Calculate the correlation matrix and the p-value matrix
+                    correlation_matrix_train = df.corr()
+                    p_value_matrix = pd.DataFrame(np.zeros(correlation_matrix_train.shape), columns=correlation_matrix_train.columns, index=correlation_matrix_train.index)
+
+                    for i in range(len(correlation_matrix_train.columns)):
+                        for j in range(len(correlation_matrix_train.columns)):
+                            if i != j:
+                                _, p_value_matrix.iat[i, j] = pearsonr(df.iloc[:, i], df.iloc[:, j])
+
+                    # Set a significance level
+                    alpha = 0.05
+
+                    # Create a mask for significant correlations
+                    significant_mask = p_value_matrix < alpha
+
+                    #Set diagonal of correlation_matrix_train to value 0
+                    np.fill_diagonal(correlation_matrix_train.values, 0.)
+
+                    # Sample one-hot encoded data (replace this with your actual data)
+                    one_hot_labels = test_y_pred
+
+                    # Convert the one-hot array to a DataFrame for easier manipulation
+                    df = pd.DataFrame(one_hot_labels, columns=link_dict.keys())
+
+                    # Calculate the correlation matrix and the p-value matrix
+                    correlation_matrix_pred = df.corr()
+                    p_value_matrix = pd.DataFrame(np.zeros(correlation_matrix_pred.shape), columns=correlation_matrix_pred.columns, index=correlation_matrix_pred.index)
+
+                    for i in range(len(correlation_matrix_pred.columns)):
+                        for j in range(len(correlation_matrix_pred.columns)):
+                            if i != j:
+                                _, p_value_matrix.iat[i, j] = pearsonr(df.iloc[:, i], df.iloc[:, j])
+
+                    # Set a significance level
+                    alpha = 0.05
+
+                    # Create a mask for significant correlations
+                    significant_mask = p_value_matrix < alpha
+
+                    #Set diagonal of correlation_matrix_train to value 0
+                    np.fill_diagonal(correlation_matrix_pred.values, 0.)
+
+
+                    #Fill nan with zeros in correlation_matrix_pred
+                    correlation_matrix_pred=correlation_matrix_pred.fillna(0)
+                    correlation_matrix_test=correlation_matrix_test.fillna(0)
+
+                    distance = np.linalg.norm(correlation_matrix_test - correlation_matrix_pred, 'fro')
+
+                    row_results.append(distance)
+                    row_results.append(configuration['threshold'])
+
+                    if bool_bayesian==False and calibrated==False and harmonic_score==True:
+                        #Save correlation matrices with dataset name + iteration name as pickle
+                        correlation_matrix_test.to_pickle(f"{dataset}_LH_{seed}_correlation_matrix_test_{seed}_KNN_{configuration['kNN']}_threshold_{configuration['threshold']}.pkl")
+
+                    ####CSD metric calculation#####
+
+                    test_correlation_matrix, significant_mask = significant_correlation_matrix(test_y_true, link_dict, alpha=0.05)
+                    train_correlation_matrix, significant_mask = significant_correlation_matrix(np.array(train_df['link_name'].tolist()), link_dict, alpha=0.05)
+                    pred_correlation_matrix, significant_mask = significant_correlation_matrix(test_y_pred, link_dict, alpha=0.05)
+                    correlation_matrix_pred=pred_correlation_matrix.fillna(0)
+                    correlation_matrix_test=test_correlation_matrix.fillna(0)
+                    distance = np.linalg.norm(correlation_matrix_test - correlation_matrix_pred, 'fro')
+                    print(f'CSD: {distance}')
+                    row_results.append(distance)               
+
+
 
                     list_results.append(row_results)
 
@@ -388,8 +524,10 @@ for seed in seeds:
         columns=['micro','Macro']
         for el in configuration['other_top_perf']:
             columns+=[f'm@{el}',f'M@{el}']
-        columns+=['m@1000','M@1000','P@R']
+        columns+=['m@1000','M@1000','P@R','KNN','Distance','Threshold','CSD']
         df_res=pd.DataFrame((np.array(list_results)*100).round(2),index=indices,columns=columns)
+
+
 
 
         #Dovrebbe sempre entrare qui
