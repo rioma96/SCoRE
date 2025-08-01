@@ -320,15 +320,11 @@ def entropy_based_sampling(full_df, selected_indices, step_size, model, configur
     entropy_analysis_path = os.path.join(analysis_dir, f"entropy_analysis_{seed}.txt")
     #label_count_analysis_path = os.path.join(analysis_dir, f"class_label_entropy_analysis_{seed}.txt")
 
-    # === Per analizzare entropie sul vero test set (ora è di tipo tensor flow shuffle dataset devo cambiarlo) ===
-    # Estrae tutti i label (secondo elemento della tupla) dal test dataset
 
-
-    all_labels = np.array(test['link_name'].tolist())  
-
-    all_labels = np.concatenate(all_labels, axis=0)  # (num_sample, num_class)
-    print(f"SHAPE DI all_labels {all_labels.shape}" )
+    all_labels = labels_test
+    print(f"SHAPE DI all_labels {all_labels.shape}")
     num_classes = all_labels.shape[1]
+
 
     #per ogni classe prende il sottoinsieme di sample che contiene quella classe e ne fa la media
     entropy_per_class = {}

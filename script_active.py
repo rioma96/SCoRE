@@ -256,8 +256,8 @@ max_iters = 40            # Iterazioni di active
 added_sample_per_iter = train_lenght // max_iters   
 
 
-max_iters = 2
-added_sample_per_iter = 1000
+max_iters = 3
+added_sample_per_iter = 500
 
 
 for seed in seeds:
