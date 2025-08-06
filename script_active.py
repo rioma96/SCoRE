@@ -251,13 +251,16 @@ def log_debug(message):
 
 
 train_lenght = len(training_dataset)
+print(train_lenght)
 log_debug(f"[DEBUG]  Lunghezza del train di partenza: {train_lenght}")
 max_iters = 40            # Iterazioni di active    
-added_sample_per_iter = train_lenght // max_iters   
+added_sample_per_iter = train_lenght // max_iters  
+
+rimanenti = train_lenght % max_iters
 
 
-max_iters = 3
-added_sample_per_iter = 500
+#max_iters = 3
+#added_sample_per_iter = 500
 
 
 for seed in seeds:
@@ -277,6 +280,9 @@ for seed in seeds:
 
     # Ad ogni iterazione add 1/40 del train_set
     for iteration in range(1, max_iters + 1):
+
+        if iteration == 40:
+            added_sample_per_iter += rimanenti
     
         process = psutil.Process(os.getpid())
         #log_debug(f"[DEBUG] Iter {iteration}: Memory usage: {process.memory_info().rss / 1024 ** 2:.2f} MB")
