@@ -309,7 +309,7 @@ for seed in seeds:
 
 
         if validation:
-            validation_dataset=validation_dataset.shuffle(buffer_size, reshuffle_each_iteration=True)
+            validation_dataset=validation_dataset.shuffle(buffer_size, reshuffle_each_iteration=True,seed=seed)
 
     
 
