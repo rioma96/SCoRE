@@ -280,9 +280,10 @@ for seed in seeds:
 
     # Ad ogni iterazione add 1/40 del train_set
     for iteration in range(1, max_iters + 1):
-
-        if iteration == 40:
-            added_sample_per_iter += rimanenti
+         
+        added_this_iter = added_sample_per_iter
+        if iteration == max_iters:
+            added_this_iter += rimanenti
     
         process = psutil.Process(os.getpid())
         #log_debug(f"[DEBUG] Iter {iteration}: Memory usage: {process.memory_info().rss / 1024 ** 2:.2f} MB")
@@ -293,7 +294,7 @@ for seed in seeds:
         training_dataset, selected_indices, filtered_train_df = select_active_subset(
                                                                             train_df,
                                                                             selected_indices,
-                                                                            added_sample_per_iter,
+                                                                            added_this_iter,
                                                                             sampling_function = sampling_fun,
                                                                             model=model,
                                                                             configuration=configuration,
