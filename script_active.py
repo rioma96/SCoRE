@@ -273,7 +273,8 @@ for seed in seeds:
       
     
     random.seed(seed)   
-    tf.random.set_seed(seed) 
+    tf.random.set_seed(seed)
+    np.random.seed(seed) 
 
 
     all_iterations_results = []         #qui salvo il dataframe di ogni iterazione

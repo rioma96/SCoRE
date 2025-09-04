@@ -624,6 +624,11 @@ def select_active_subset(full_df, selected_indices, step_size,
 
     already_selected = set(selected_indices)
     final_indices = sorted(list(already_selected.union(new_indices)))
+
+    assert len(new_indices) == len(set(new_indices)), "Duplicati in new_indices!"
+    #Controllo che effettivamente tutti gli indici siano nuovi rispetto ai vecchi
+    assert len(final_indices) == len(already_selected) + len(set(new_indices))
+
     df_subset = full_df.iloc[final_indices].reset_index(drop=True)          #Questo è "train_df" filtrato
 
 
