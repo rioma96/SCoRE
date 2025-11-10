@@ -1,0 +1,111 @@
+NY10D COMAL NO SHARED
+
+F1 micro globale: 0.8736870455157555
+F1 macro globale: 0.26154208522176736
+config:
+'kNN':50,
+'threshold':0.5,
+'distance':'euclidean',
+'activation':'swish', 
+'learning_rate':0.0005,
+'temperature':0.01,
+'base_temperature':1,
+'optimizer':tf.keras.optimizers.serialize(tf.keras.optimizers.AdamW()),#tf.keras.optimizers.legacy.Adam(),
+'output_dimensions':15,
+'depth':5,
+'pert': 0.1
+
+WIKI20M COMAL NO SHARED 
+
+F1 micro globale: 0.8253418818873637
+F1 macro globale: 0.7929569287685071
+
+config:
+'kNN':50,
+'threshold':0.5,
+'distance':'euclidean',
+'activation':'swish', 
+'learning_rate':0.0005,
+'temperature':0.01,
+'base_temperature':1,
+'optimizer':tf.keras.optimizers.serialize(tf.keras.optimizers.AdamW()),#tf.keras.optimizers.legacy.Adam(),
+'output_dimensions':15,
+'depth':5,
+'pert': 0.1
+
+
+DISREX COMAL NO SHARED 
+
+F1 micro globale: 0.7336170425189381
+F1 macro globale: 0.5836512528033079
+
+config:
+'kNN':50,
+'threshold':0.5,
+'distance':'euclidean',
+'activation':'swish', 
+'learning_rate':0.0005,
+'temperature':0.01,
+'base_temperature':1,
+'optimizer':tf.keras.optimizers.serialize(tf.keras.optimizers.AdamW()),#tf.keras.optimizers.legacy.Adam(),
+'output_dimensions':15,
+'depth':5,
+'pert': 0.1
+
+
+NYT10M COMAL NO SHARED 
+
+F1 micro globale: 0.7781199785752545
+F1 macro globale: 0.36256056045366086
+
+config:
+'kNN':50,
+'threshold':0.5,
+'distance':'euclidean',
+'activation':'swish', 
+'learning_rate':0.0005,
+'temperature':0.01,
+'base_temperature':1,
+'optimizer':tf.keras.optimizers.serialize(tf.keras.optimizers.AdamW()),#tf.keras.optimizers.legacy.Adam(),
+'output_dimensions':15,
+'depth':5,
+'pert': 0.1
+
+
+NYT10M COMAL SHARED 
+
+F1 micro globale: 0.7734474229560798
+F1 macro globale: 0.35075228354592963
+
+config:
+'kNN':50,
+'threshold':0.5,
+'distance':'euclidean',
+'activation':'swish', 
+'learning_rate':0.0005,
+'temperature':0.01,
+'base_temperature':1,
+'optimizer':tf.keras.optimizers.serialize(tf.keras.optimizers.AdamW()),#tf.keras.optimizers.legacy.Adam(),
+'output_dimensions':15,
+'depth':5,
+'pert': 0.1
+
+
+NYT10D COMAL SHARED
+
+F1 Micro: 0.884526967285588
+F1 Macro: 0.46049778870975194
+
+config:
+'kNN':50,
+'threshold':0.5,
+'distance':'euclidean',
+'activation':'swish', 
+'learning_rate':0.0005,
+'temperature':0.01,
+'base_temperature':1,
+'optimizer':tf.keras.optimizers.serialize(tf.keras.optimizers.AdamW()),#tf.keras.optimizers.legacy.Adam(),
+'output_dimensions':15,
+'depth':5,
+'pert': 0.1
+'depth_encoder':5,

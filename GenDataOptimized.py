@@ -11,33 +11,30 @@ import itertools
 import numpy as np
 import os
 import sys
-import tensorflow as tf
-import tensorflow_hub as hub
-import tensorflow_text as text
-import torch
-import time 
-import concurrent.futures
-from multiprocessing import Lock, Pool
-from codecarbon import track_emissions
+import time
 import argparse
 import logging
-from codecarbon import track_emissions
-from transformers import TFRobertaModel, RobertaTokenizer, MambaConfig, MambaModel, AutoTokenizer, MambaForCausalLM
-from joblib import Parallel, delayed
+from codecarbon import EmissionsTracker
 
-#mp.set_start_method('spawn', force=True)
+# Trasformers e TF (tokenizer fast + TFBertModel)
+from transformers import BertTokenizerFast, TFBertModel
+import tensorflow as tf
+import h5py
+from tqdm import tqdm
+
 
 def load_wiki20m(path, file_name,columns,NA=False):
     
     raw_data = []
     clean_text=[]
+    clean_text_map = {}
     processed_data = []
     # Opening JSON file
     with open(path+file_name,encoding='utf-8') as f:
         for line in f:
             line = line.rstrip()
             if len(line) > 0:
-                raw_data.append(eval(line))
+                raw_data.append(json.loads(line))
     
     for sent_num in range(len(raw_data)):
 
@@ -52,11 +49,12 @@ def load_wiki20m(path, file_name,columns,NA=False):
         text= ' '.join(doc['token'])
         begin_sentence=0
         end_sentence=len(text)
-        if text in clean_text:
-            clean_text_position = clean_text.index(text)
+        if text in clean_text_map:
+            clean_text_position = clean_text_map[text]
         else:
+            clean_text_position = len(clean_text)
             clean_text.append(text)
-            clean_text_position = clean_text.index(text)
+            clean_text_map[text] = clean_text_position
     
         head_tok_start = doc['h']['pos'][0]
         head_tok_end = doc['h']['pos'][1]
@@ -119,7 +117,7 @@ def load_nyt10d(path,file_name,columns,NA=False):
         for line in f:
             line = line.rstrip()
             if len(line) > 0:
-                raw_data.append(eval(line))
+                raw_data.append(json.loads(line))
     
     for sent_num in range(len(raw_data)):
 
@@ -158,6 +156,7 @@ def load_nyt10m(path,file_name,columns,NA=False):
 def load_gds(path,file_name,columns,NA=False):
     raw_data = []
     clean_text=[]
+    clean_text_map = {}
     processed_data = []
     # Opening JSON file
     with open(path+file_name,encoding='utf-8') as f:
@@ -185,11 +184,12 @@ def load_gds(path,file_name,columns,NA=False):
         text= ' '.join(doc['sent'])
         begin_sentence=0
         end_sentence=len(text)
-        if text in clean_text:
-            clean_text_position = clean_text.index(text)
+        if text in clean_text_map:
+            clean_text_position = clean_text_map[text]
         else:
+            clean_text_position = len(clean_text)
             clean_text.append(text)
-            clean_text_position = clean_text.index(text)
+            clean_text_map[text] = clean_text_position
 
         head_id = doc['obj']
         head_start_bound = [m.start() for m in re.finditer(re.escape(doc['obj']), text)]
@@ -267,8 +267,9 @@ def elaborate_Trex(path,columns,rebel=False,NA=False):
     
                     processed_data.append([head_id,tail_id,relation,text,begin_sentence,end_sentence,head_start_bound,head_end_bound,tail_start_bound,tail_end_bound])
                     positive_counter+=1
-                except:
+                except Exception as e:
                     erroneous_counter+=1
+                    logger.debug("Skipped triple due to error: %s", e)
     processed_data=pd.DataFrame(processed_data,columns= columns)
     # print(erroneous_counter/(erroneous_counter+positive_counter))
     return processed_data
@@ -309,6 +310,7 @@ def load_Rebel(path,file_name,columns,NA=False):
     positive_counter=0
     raw_data=[]
     clean_text=[]
+    clean_text_map = {}
     file = sorted(glob.glob(path+file_name+"*"))
     # Opening JSON file
     with open(file[0],encoding='utf-8') as f:
@@ -325,11 +327,12 @@ def load_Rebel(path,file_name,columns,NA=False):
         text= doc["text"]
         begin_sentence=0
         end_sentence=len(text)
-        if text in clean_text:
-            clean_text_position = clean_text.index(text)
+        if text in clean_text_map:
+            clean_text_position = clean_text_map[text]
         else:
+            clean_text_position = len(clean_text)
             clean_text.append(text)
-            clean_text_position = clean_text.index(text)
+            clean_text_map[text] = clean_text_position
             
         #Check if document has annotated triples
         if len(doc["triples"]) > 0:
@@ -355,8 +358,9 @@ def load_Rebel(path,file_name,columns,NA=False):
 
                     processed_data.append([head_id,tail_id,relation,distant_y,clean_text_position,begin_sentence,end_sentence,head_start_bound,head_end_bound,tail_start_bound,tail_end_bound])
                     positive_counter+=1
-                except:
+                except Exception as e:
                     erroneous_counter+=1
+                    logger.debug("Rebel: skipped triple due to error: %s", e)
     if not 'distant_y' in columns:
         columns.insert(3,'distant_y')
     processed_data=pd.DataFrame(processed_data,columns= columns)
@@ -364,415 +368,327 @@ def load_Rebel(path,file_name,columns,NA=False):
     return processed_data, clean_text
 
 
-def init_BERT(only_real_token=False, extract_CLS_only=False):
-    
-    preprocessor = hub.load("https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3")
-    
-    # Step 1: tokenize batches of text inputs.
-    text_inputs = [tf.keras.layers.Input(shape=(), dtype=tf.string)] # 2 input layers for 2 text inputs
-    tokenize = hub.KerasLayer(preprocessor.tokenize)
-    tokenized_inputs = [tokenize(segment) for segment in text_inputs]
-    
-    # Step 3: pack input sequences for the Transformer encoder.
-    seq_length = 512  # Your choice here.
-    bert_pack_inputs = hub.KerasLayer(
-        preprocessor.bert_pack_inputs,
-        arguments=dict(seq_length=seq_length))  # Optional argument.
-    encoder_inputs = bert_pack_inputs(tokenized_inputs)
-    
-    encoder = hub.KerasLayer(
-        "https://tfhub.dev/tensorflow/bert_en_uncased_L-12_H-768_A-12/4",
-        trainable=False)
-    outputs = encoder(encoder_inputs)
-    # Get the output of the [CLS] token, which represents the sentence embedding.
-    pooled_output = outputs["pooled_output"]      # [batch_size, 768].
-    sequence_output = outputs["sequence_output"]  # [batch_size, seq_length, 768].
-    
-    # Obtain the token mask indicating which tokens belong to the actual input sentences.
-    input_mask = encoder_inputs["input_mask"]
-    
-    # Cast input mask to float32 to match the data type of sequence output.
-    input_mask = tf.cast(input_mask, dtype=tf.float32)
-    
-    # Apply the input mask to filter out padding tokens.
-    filtered_sequence_output = sequence_output * tf.expand_dims(input_mask, axis=-1)
-    
-    if only_real_token:
-        # Keep only tokens from the original input sentence (excluding [CLS] and [SEP])
-        start_token_index = 1  # Start after [CLS]
-        
-        # Compute the end token index based on the input_mask
-        end_token_index = tf.reduce_sum(input_mask, axis=-1) - 1
-        
-        # Squeeze the end_token_index tensor to remove extra dimensions
-        end_token_index = tf.squeeze(end_token_index, axis=-1)
-        
-        # Convert end_token_index to a scalar tensor
-        end_token_index = tf.cast(end_token_index, dtype=tf.int32)
-        
-        # Create a range of indices from start_token_index to end_token_index
-        indices = tf.range(start_token_index, end_token_index)
-        filtered_sequence_output = filtered_sequence_output[:, start_token_index:end_token_index]
-    
-    if extract_CLS_only:
-        embedding_model = tf.keras.Model(text_inputs, pooled_output)  # Extract [CLS] token embedding if you put pooled_output.
-    else:
-        embedding_model = tf.keras.Model(text_inputs, filtered_sequence_output) # Extract tokens masked embedding if you put filtered_sequence_output.
-    
-    #sentences = tf.constant([sentence])
-    return embedding_model, preprocessor,tokenize
-
-
-def init_Mamba(only_real_token=False, extract_CLS_only=False):
-    try:
-
-        model_name = "state-spaces/mamba-130m-hf"
-        
-        # Load tokenizer and model
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        model = MambaForCausalLM.from_pretrained(model_name)
-        
-        # Add special tokens if missing
-        if tokenizer.pad_token is None:
-            tokenizer.add_special_tokens({'pad_token': '[PAD]'})
-        if tokenizer.eos_token is None:
-            tokenizer.add_special_tokens({'eos_token': '[EOS]'})
-        
-        class MambaEmbeddingModel(tf.keras.Model):
-            def __init__(self, model, tokenizer):
-                super(MambaEmbeddingModel, self).__init__()
-                self.model = model
-                self.tokenizer = tokenizer
-                self.model.eval()  # Set to evaluation mode
-                
-            def call(self, inputs):
-                # Ensure input is properly formatted for tokenizer
-                if isinstance(inputs, tf.Tensor):
-                    texts = [x.numpy().decode('utf-8') for x in inputs]
-                else:
-                    texts = [str(x) for x in inputs]
-                
-                # Tokenize with proper input format
-                tokens = self.tokenizer(
-                    text=texts,  # Explicitly specify text input
-                    padding='max_length',
-                    truncation=True,
-                    max_length=512,
-                    return_tensors='pt'  # Use PyTorch tensors for model
-                )
-                
-                # Get embeddings
-                with torch.no_grad():
-                    outputs = self.model(
-                        input_ids=tokens['input_ids'],
-                        attention_mask=tokens['attention_mask'],
-                        output_hidden_states=True
-                    )
-                
-                # Convert to TensorFlow tensors
-                return tf.convert_to_tensor(outputs.hidden_states[-1].numpy())
-        
-        keras_model = MambaEmbeddingModel(model, tokenizer)
-        return keras_model, None, tokenizer
-        
-    except Exception as e:
-        print(f"Error initializing Mamba: {str(e)}")
-        raise
-
-def init_RoBERTa(only_real_token=False, extract_CLS_only=False):
-    model_name = "roberta-base"
-    tokenizer = RobertaTokenizer.from_pretrained(model_name)
-    encoder = TFRobertaModel.from_pretrained(model_name, trainable=False)
-
-    class RobertaEmbeddingModel(tf.keras.Model):
-        def __init__(self, encoder, tokenizer):
-            super(RobertaEmbeddingModel, self).__init__()
-            self.encoder = encoder
-            self.tokenizer = tokenizer
-
-        def call(self, inputs):
-            # Convert tensor to numpy and decode to string
-            texts = [x.numpy().decode('utf-8') for x in inputs]
-            
-            # Tokenize with RoBERTa tokenizer
-            tokens = self.tokenizer(
-                texts,
-                padding='max_length',
-                truncation=True,
-                max_length=512,
-                return_tensors='tf'
-            )
-            
-            # Get embeddings
-            outputs = self.encoder(
-                input_ids=tokens['input_ids'],
-                attention_mask=tokens['attention_mask']
-            )
-            
-            return outputs.last_hidden_state
-
-    model = RobertaEmbeddingModel(encoder, tokenizer)
-    return model, None, tokenizer
-
-
-def check_if_head_tail_are_included_in_sentence(sentence, head_start, head_end, tail_start, tail_end):
-    head_included = False
-    tail_included = False
-    if (head_start >= 0 and head_start<len(sentence)) and (head_end>0 and head_end < len(sentence)):
-        head_included = True
-    if (tail_start >= 0 and tail_start<len(sentence)) and (tail_end>0 and tail_end < len(sentence)):
-        tail_included = True
-    return head_included, tail_included
-
-
-
-def find_entity_tensor_slice(frase, preprocessor, entity_start_pos, entity_end_pos):
-    frase = str(frase)  # Ensure we have a string
-    
-    if isinstance(preprocessor, RobertaTokenizer):  # RoBERTa case
-        # Tokenize the full sentence up to entity end
-        tokens_to_end = preprocessor.tokenize(frase[:entity_end_pos])
-        # Tokenize just the entity
-        entity_tokens = preprocessor.tokenize(frase[entity_start_pos:entity_end_pos])
-        
-        bound_end = len(tokens_to_end) + 1  # +1 for [CLS]
-        bound_start = bound_end - len(entity_tokens)
-    
-    elif hasattr(preprocessor, 'name_or_path') and 'mamba' in preprocessor.name_or_path.lower():  # Mamba case
-        # Tokenize the full sentence up to entity end
-        tokens_to_end = preprocessor.tokenize(frase[:entity_end_pos])
-        # Tokenize just the entity
-        entity_tokens = preprocessor.tokenize(frase[entity_start_pos:entity_end_pos])
-        
-        bound_end = len(tokens_to_end) + 1  # +1 for [CLS]
-        bound_start = bound_end - len(entity_tokens)
-    
-    else:  # BERT case
-        tokenized_to_entity_end = preprocessor.tokenize(tf.constant([frase[:entity_end_pos]])).to_list()[0]
-        entity_tokenized = preprocessor.tokenize(tf.constant([frase[entity_start_pos:entity_end_pos]])).to_list()[0]
-        
-        all_token_slice = []
-        for tok in entity_tokenized:
-            for i in tok:
-                all_token_slice.append(i)
-        entity_lenght = len(all_token_slice)
-        
-        all_token_sentence = []
-        for element in tokenized_to_entity_end:
-            for i in element:
-                all_token_sentence.append(i)
-
-        bound_end = len(all_token_sentence) + 1
-        bound_start = (bound_end - entity_lenght)
-    
-    return bound_start, bound_end
-
-
-def check_if_head_tail_are_included_in_Tokens(sentence, preprocessor, h_s, h_e, t_s, t_e, bert_token_window=512):
-    bert_token_window = bert_token_window - 2
-    max_index = max(h_s, h_e, t_s, t_e)
-    sentence_to_index = str(sentence[:max_index])  # Ensure we have a string
-    
-    if isinstance(preprocessor, RobertaTokenizer):  # RoBERTa case
-        tokens = preprocessor.tokenize(sentence_to_index)
-        tokens_of_sub_text = tokens
-        # logger.info(f"Tokens: {tokens}")
-
-    elif hasattr(preprocessor, 'name_or_path') and 'mamba' in preprocessor.name_or_path.lower():  # Mamba case
-        # Tokenize the full sentence up to entity end
-        tokens = preprocessor.tokenize(sentence_to_index)
-        tokens_of_sub_text = tokens
-        # logger.info(f"Tokens: {tokens}")
-    
-    else:  # BERT case
-        sub_sentence = tf.constant([sentence_to_index])
-        tokenized_sub_text = preprocessor.tokenize(sub_sentence)
-        tokens_of_sub_text = []
-        for row in tokenized_sub_text:
-            for element in row:
-                for i in element.numpy():
-                    tokens_of_sub_text.append(i)
-
-    if len(tokens_of_sub_text) > bert_token_window:
-        return False, tokens_of_sub_text
-    else:
-        return True, tokens_of_sub_text
-
-    
-def add_entities_markers(sentence,h_s, h_e, t_s, t_e):
-    sentence_with_markers=sentence[:h_s]+"[E1] "+sentence[h_s:h_e]+" [/E1]"+sentence[h_e:t_s]+"[E2] "+sentence[t_s:t_e]+" [/E2]"+sentence[t_e:]
-    new_h_s=h_s+0 #adjust head start adding 4 char of <e1>
-    new_h_e=h_e+11 #adjust head end addung 4 char of <e1>
-    new_t_s=t_s+11 #adjusting tail start adding 9 char of <e1> </e1> <e2>
-    new_t_e=t_e+22 #adjusting tail end adding 18 char of <e1> </e1> <e2>
-    return sentence_with_markers,new_h_s,new_h_e,new_t_s,new_t_e
-
-####Function to generate sentence embedding for each row of a dataframe####
-####Returns a list containing a tensor for CLS, tensors for head tokens and tail tokens#####
-def embedd_row(row,model,preprocessor,markers=False):
-    # logger.info(f"Processing row: {row}")
-    if markers:
-        row['sentence'], row['head_start'], row['head_end'], row['tail_start'], row['tail_end'] = add_entities_markers(row['sentence'],row['head_start'], row['head_end'], row['tail_start'], row['tail_end'])
-    # logger.info(f"Processing sentence: {row['sentence']}")
-    emt=model(tf.constant([row['sentence']]))
-    # logger.info(f"Embedding shape: {emt[0].shape}")
-    included,_=check_if_head_tail_are_included_in_Tokens(row['sentence'], preprocessor, row['head_start'], row['head_end'],
-                                                         row['tail_start'], row['tail_end'], bert_token_window=512)
-    head_included, tail_included = check_if_head_tail_are_included_in_sentence(row['sentence'], row['head_start'], row['head_end'], row['tail_start'], row['tail_end'])
-    if not included or not head_included or not tail_included:
-        print("Entity not included in sentence: ", row['sentence'])
-        print("Head included: ", head_included)
-        print("Tail included: ", tail_included)
-        print("Included in tokens: ", included)
-        print("Head start: ", row['head_start'])
-        print("Head end: ", row['head_end'])
-        print("Tail start: ", row['tail_start'])
-        print("Tail end: ", row['tail_end'])
-        logger.info("Entity not included in sentence")
-        return np.nan
-
-
-    tensors_cls_head_tail=[]
-    tensors_head_start_index, tensors_head_end_index=find_entity_tensor_slice(row['sentence'],preprocessor, row['head_start'], row['head_end'])
-    tensors_tail_start_index, tensors_tail_end_index=find_entity_tensor_slice(row['sentence'],preprocessor, row['tail_start'], row['tail_end'])
-    tensors_cls_head_tail.append(emt[0][0]) #CLS
-    # logger.info(f"Head start index: {tensors_head_start_index}, Head end index: {tensors_head_end_index}")
-    # logger.info(f"Tail start index: {tensors_tail_start_index}, Tail end index: {tensors_tail_end_index}")
-    # logger.info(f"Head tensor: {emt[0][tensors_head_start_index:tensors_head_end_index].shape}")
-    # logger.info(f"Tail tensor: {emt[0][tensors_tail_start_index:tensors_tail_end_index].shape}")
-    tensors_cls_head_tail.append(emt[0][tensors_head_start_index:tensors_head_end_index]) #head
-    tensors_cls_head_tail.append(emt[0][tensors_tail_start_index:tensors_tail_end_index]) #tail
-
-    return tensors_cls_head_tail
-    
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Constants
+# Per mantenere consistenza con il tuo codice originale:
 COLUMNS = ['syn_id_head', 'syn_id_tail', 'link_name', 'doc_pos', 'sent_start', 'sent_end',
            'head_start', 'head_end', 'tail_start', 'tail_end']
 POSITION_COLUMNS = ['doc_pos', 'sent_start', 'sent_end', 'head_start', 'head_end', 'tail_start', 'tail_end']
-CHUNK_SIZE = 5000
+CHUNK_SIZE = 30000  # lo mantengo come nel tuo codice originale; puoi ridurlo in base alla RAM
 
-# Utility function to generate chunks
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ============================================================
+# Setup modello e tokenizer (caricati una volta)
+# ============================================================
+MODEL_NAME = "bert-base-uncased"
+MAX_LENGTH = 512  # finestra BERT, pari a quanto usavi
+DEFAULT_BATCH_SIZE = 64
+
+def init_transformers(model_name=MODEL_NAME):
+    logger.info(f"Loading tokenizer and model: {model_name}")
+    tokenizer = BertTokenizerFast.from_pretrained(model_name)
+    model = TFBertModel.from_pretrained(model_name)
+    # Impostazioni opzionali per migliori performance (XBENCH/TF)
+    # tf.config.optimizer.set_jit(True)  # XLA JIT (opzionale, testare)
+    return tokenizer, model
+
+# ============================================================
+# Funzione di utilità per chunking
+# ============================================================
 def chunk_dataframe(df, chunk_size):
-    logger.info(f"Chunking dataframe of size {len(df)} into chunks of size {chunk_size}...")
     for start in range(0, len(df), chunk_size):
         yield df[start:start + chunk_size]
 
-# Global model and preprocessor
-def init_worker(model_name):
-    """Initialize model locally per worker."""
-    tf.keras.backend.clear_session()
-    if model_name == "bert":
-        model, preprocessor, _ = init_BERT()
-    elif model_name == "roberta":
-        model, _, preprocessor = init_RoBERTa()
-    elif model_name == "mamba":
-        model, _, preprocessor = init_Mamba()
-    return model, preprocessor
+# ============================================================
+# Embedding batch (tokenizer fast + offset mapping)
+# ============================================================
+def embed_batch(sentences, head_spans, tail_spans, tokenizer, model,
+                batch_size=DEFAULT_BATCH_SIZE, max_length=MAX_LENGTH):
+    """
+    Restituisce una lista con lo stesso ordine delle 'sentences'.
+    Per le righe non processabili (es: entità troncata) restituisce None.
+    Altrimenti restituisce dict {'cls': np.array, 'head': np.array, 'tail': np.array}.
+    """
+    results = []
+    model_trainable_flag = getattr(model, 'training', False)
+    for i in range(0, len(sentences), batch_size):
+        batch_sents = sentences[i:i+batch_size]
+        batch_heads = head_spans[i:i+batch_size]
+        batch_tails = tail_spans[i:i+batch_size]
 
-def process_chunk(chunk, model_name):
-    try:
-        model, preprocessor = init_worker(model_name)
-        logger.info(f"Processing chunk with {len(chunk)} rows")
-        chunk['sentence'] = chunk['sentence'].astype(str)
-        chunk['embeddings'] = chunk.apply(
-            lambda row: embedd_row(row, model, preprocessor), axis=1)
-        return chunk[~chunk['embeddings'].isna()]
-    except Exception as e:
-        logger.error(f"Error in worker: {str(e)}")
-        # Ensure TensorFlow resources are released
-        tf.keras.backend.clear_session()
-        raise
-    finally:
-        # Force cleanup
-        tf.keras.backend.clear_session()
-        gc.collect()
-
-
-
-def preprocess_and_embed(dataset_name, model_name, NA=False):
-    dataset_configs = {
-        "nyt10d": ("RawDatasets/NYT10D/", "Datasets/NYT10D/",
-                   ["nyt10_test.txt", "nyt10_train.txt"], load_nyt10d),
-        "wiki20m": ("RawDatasets/Wiki20m/", "Datasets/Wiki20m/",
-                    ["wiki20m_train.txt", "wiki20m_val.txt", "wiki20m_test.txt"], load_wiki20m),
-        "nyt10m": ("RawDatasets/NYT10m/", "Datasets/NYT10m/",
-                   ["nyt10m_test.txt", "nyt10m_train.txt", "nyt10m_val.txt"], load_nyt10m),
-        "disrex": ("RawDatasets/DisRex/DiS-ReX/english/", "Datasets/DisRex/",
-                   ["disrex_val.txt", "disrex_test.txt", "disrex_train.txt"], load_DisRex),
-        "wiki20distant": ("RawDatasets/Wiki20Distant/", "Datasets/Wiki20Distant/",
-                          ["wiki20d_train.txt", "wiki20d_val.txt"], load_wiki20m),
-    }
-    
-    if dataset_name not in dataset_configs:
-        raise ValueError(f"Dataset {dataset_name} configuration not found.")
-    
-    path, path_out, file_names, load_dataset_function = dataset_configs[dataset_name]
-    
-    if not os.path.exists(path_out):
-        os.makedirs(path_out)
-    
-    for file in file_names:
-        output_path = os.path.join(path_out, f"{dataset_name}{file}_chunk_0.pkl")
-        if os.path.isfile(output_path):
-            logger.info(f"Embedding for {file} already exists.")
-            continue
-        
-        logger.info(f"Loading and preprocessing {file}...")
-        result, ct = load_dataset_function(path, file, COLUMNS, NA)
-        result["doc_pos"] = result["doc_pos"].apply(lambda x: ct[x])
-        result.rename(columns={"doc_pos": "sentence"}, inplace=True)
-        
-        logger.info(f"Processing {file} in chunks...")
-        chunks = list(chunk_dataframe(result, CHUNK_SIZE))  
-        if not chunks:  
-            logger.warning(f"No data to process for {file}. Skipping...")
-            continue
-        
-        num_workers = min(3, len(chunks))  
-        logger.info(f"Processing {len(chunks)} chunks with {num_workers} workers...")
-
-        # Process chunks in parallel using Joblib
-        results = Parallel(n_jobs=num_workers, backend="multiprocessing")(
-            delayed(process_chunk)(chunk, model_name) for chunk in chunks
+        # Tokenizzazione con offset mapping (fast tokenizer)
+        enc = tokenizer(
+            batch_sents,
+            padding=True,
+            truncation=True,
+            max_length=max_length,
+            return_offsets_mapping=True,
+            return_tensors="tf"
         )
 
-        # Save chunks sequentially (avoid parallel disk writes)
-        for i, chunk in enumerate(results):
-            chunk_output_path = os.path.join(path_out, f"{dataset_name}{file}_chunk_{i}.pkl")
-            if not os.path.isfile(chunk_output_path):
-                logger.info(f"Saving chunk {i} for {file}...")
-                chunk.to_pickle(chunk_output_path)
-                logger.info(f"Chunk {i} saved to {chunk_output_path}")
-            
+        # Forward pass (disabilitiamo gradiente)
+        # training=False passed to model call; avoid deprecated set_learning_phase
+        outputs = model(enc["input_ids"], attention_mask=enc["attention_mask"], training=False)
+        last_hidden = outputs.last_hidden_state  # Tensor shape (batch, seq_len, hidden)
+        # Convertire offset mapping e last_hidden in numpy array (batch, seq_len, ...)
+        try:
+            last_hidden_np = last_hidden.numpy()
+        except Exception:
+            # In some TF setups, tensor may already be numpy-like; fallback
+            last_hidden_np = np.array(last_hidden)
+        offset_mapping = enc["offset_mapping"].numpy()
+
+        for b_idx in range(len(batch_sents)):
+            sent = batch_sents[b_idx]
+            h_start, h_end = batch_heads[b_idx]
+            t_start, t_end = batch_tails[b_idx]
+
+            # Check bounds carattere rispetto alla lunghezza della frase
+            if not (0 <= h_start < h_end <= len(sent)) or not (0 <= t_start < t_end <= len(sent)):
+                # invalid char bounds -> skip
+                logger.debug("Bounds invalid or out of sentence range; skipping.")
+                results.append(None)
+                continue
+
+            offsets = offset_mapping[b_idx]  # array di (start,end) per token
+
+            # Trova token i cui offset overlap con l'entità (condizione overlap migliore)
+            head_token_idxs = [j for j, (s, e) in enumerate(offsets) if e > 0 and (s < h_end and e > h_start)]
+            tail_token_idxs = [j for j, (s, e) in enumerate(offsets) if e > 0 and (s < t_end and e > t_start)]
+
+            # Se è vuoto vuol dire che la tokenizzazione ha troncato l'entità o l'entità non è riconosciuta
+            if len(head_token_idxs) == 0 or len(tail_token_idxs) == 0:
+                logger.debug(f"Entity tokens not found (maybe truncated). head_idxs:{head_token_idxs} tail_idxs:{tail_token_idxs}")
+                results.append(None)
+                continue
+
+            # Calcola embeddings (mean pooling sui token dell'entità)
+            try:
+                cls_emb = last_hidden_np[b_idx][0]
+                head_emb = np.mean(last_hidden_np[b_idx][head_token_idxs, :], axis=0)
+                tail_emb = np.mean(last_hidden_np[b_idx][tail_token_idxs, :], axis=0)
+                results.append({"cls": cls_emb, "head": head_emb, "tail": tail_emb})
+            except Exception as e:
+                logger.exception("Error while extracting embeddings for a batch element: %s", e)
+                results.append(None)
+
+        # cleanup per batch
+        del enc, outputs, last_hidden, offset_mapping
+        gc.collect()
+
+    return results
+
+# ============================================================
+# Funzione che processa un chunk (DataFrame) e salva HDF5 + meta CSV
+# ============================================================
+def process_and_save_chunk(df_chunk, tokenizer, model, dataset_name, file_name, out_dir,
+                           chunk_id, batch_size=DEFAULT_BATCH_SIZE, max_length=MAX_LENGTH):
+    """
+    df_chunk: DataFrame che contiene almeno le colonne:
+        'sentence','head_start','head_end','tail_start','tail_end'
+    Salva:
+      - out_dir/{dataset_name}_{file_safe}_chunk_{chunk_id}.h5  (datasets: cls, head, tail)
+      - out_dir/{dataset_name}_{file_safe}_chunk_{chunk_id}_meta.csv  (metadati delle righe valide)
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    sentences = df_chunk["sentence"].tolist()
+    head_spans = list(zip(df_chunk["head_start"], df_chunk["head_end"]))
+    tail_spans = list(zip(df_chunk["tail_start"], df_chunk["tail_end"]))
+
+    embeddings = embed_batch(sentences, head_spans, tail_spans, tokenizer, model,
+                             batch_size=batch_size, max_length=max_length)
+
+    valid_indices = [i for i, e in enumerate(embeddings) if e is not None]
+    if len(valid_indices) == 0:
+        logger.info(f"No valid embeddings in chunk {chunk_id} for file {file_name}. Nothing saved.")
+        return
+
+    # Costruisci array numpy da salvare (solo righe valide)
+    cls_arr = np.stack([embeddings[i]["cls"] for i in valid_indices])
+    head_arr = np.stack([embeddings[i]["head"] for i in valid_indices])
+    tail_arr = np.stack([embeddings[i]["tail"] for i in valid_indices])
+
+    file_safe = file_name.replace(os.sep, "_").replace(".", "_")
+    lower_file = file_name.lower()
+    if 'test' in lower_file:
+        split = 'test'
+    elif 'train' in lower_file:
+        split = 'train'
+    elif 'val' in lower_file or 'validation' in lower_file:
+        split = 'val'
+    else:
+        split = 'other'
+
+    target_dir = os.path.join(out_dir, dataset_name, split)
+    os.makedirs(target_dir, exist_ok=True)
+    pkl_path = os.path.join(target_dir, f"{dataset_name}{file_safe}_chunk_{chunk_id}.pkl")
+    meta_path = os.path.join(target_dir, f"{dataset_name}{file_safe}_chunk_{chunk_id}_meta.csv")
+
+    # Salva come pickle (dict di numpy arrays)
+    to_save = {"cls": cls_arr, "head": head_arr, "tail": tail_arr}
+    try:
+        with open(pkl_path, "wb") as pf:
+            pickle.dump(to_save, pf, protocol=pickle.HIGHEST_PROTOCOL)
+        logger.info(f"Saved embeddings to {pkl_path} ({cls_arr.shape[0]} examples).")
+    except Exception as e:
+        logger.exception("Failed to save pickle file %s: %s", pkl_path, e)
+
+    # Salva metadati (righe del dataframe corrispondenti ai valid_indices)
+    df_meta = df_chunk.iloc[valid_indices].copy()
+    # Conserva anche l'indice originale per tracciabilità
+    df_meta.reset_index(inplace=True)
+    df_meta.rename(columns={"index": "orig_index"}, inplace=True)
+    df_meta.to_csv(meta_path, index=False, encoding='utf-8')
+    logger.info(f"Saved metadata to {meta_path}.")
+
+    # liberiamo memoria
+    del cls_arr, head_arr, tail_arr, embeddings, df_meta, to_save
+    gc.collect()
+
+# ============================================================
+# Funzione principale: integra i loader originali e l'embedding ottimizzato
+# ============================================================
+def preprocess_and_embed(dataset_name, NA=False, chunk_size=CHUNK_SIZE, batch_size=DEFAULT_BATCH_SIZE, out_root="Datasets_Emb"):
+    """
+    dataset_name: come prima (es 'nyt10d', 'wiki20m', ...)
+    NA: se includere NA relations
+    Salva per ogni file del dataset i chunk in out_root/
+    """
+    # Config dataset (come nel tuo codice)
+    dataset_configs = {
+        "nyt10d": ("RawDatasets/NYT10D/", "Datasets/NYT10D/", ["nyt10_test.txt", "nyt10_train.txt"], load_nyt10d),
+        "wiki20m": ("RawDatasets/Wiki20m/", "Datasets/Wiki20m/", ["wiki20m_train.txt", "wiki20m_val.txt", "wiki20m_test.txt"], load_wiki20m),
+        "nyt10m": ("RawDatasets/NYT10m/", "Datasets/NYT10m/", ["nyt10m_test.txt", "nyt10m_train.txt", "nyt10m_val.txt"], load_nyt10m),
+        "disrex": ("RawDatasets/DiS-ReX/english/", "Datasets/DisRex/", ["disrex_val.txt", "disrex_test.txt", "disrex_train.txt"], load_DisRex),
+        "wiki20distant": ("RawDatasets/Wiki20Distant/", "Datasets/Wiki20Distant/", ["wiki20d_train.txt", "wiki20d_val.txt"], load_wiki20m),
+        # aggiungi altri se li hai
+    }
+
+    if dataset_name not in dataset_configs:
+        raise ValueError(f"Dataset {dataset_name} configuration not found.")
+
+    raw_path, path_out, file_names, load_dataset_function = dataset_configs[dataset_name]
+    os.makedirs(path_out, exist_ok=True)
+    os.makedirs(out_root, exist_ok=True)
+
+    # Inizializza tokenizer + modello UNA SOLA VOLTA
+    tokenizer, model = init_transformers(MODEL_NAME)
+
+    for file in file_names:
+        # Decide split folder from filename (train/val/test/other)
+        fname_lower = file.lower()
+        if 'test' in fname_lower:
+            split = 'test'
+        elif 'train' in fname_lower:
+            split = 'train'
+        elif 'val' in fname_lower or 'validation' in fname_lower:
+            split = 'val'
+        else:
+            split = 'other'
+
+        # Costruisco il percorso del file meta di controllo sotto out_root/dataset_name/split
+        sample_meta_path = os.path.join(out_root, dataset_name, split, f"{dataset_name}{file}_chunk_0_meta.csv")
+        if os.path.isfile(sample_meta_path):
+            logger.info(f"Embedding for {file} already exists (meta file found at {sample_meta_path}). Skipping.")
+            continue
+
+        logger.info(f"Loading and preprocessing {file}...")
+        # Carica dataset (le tue funzioni ritornano processed_data, clean_text in genere)
+        result, ct = load_dataset_function(raw_path, file, COLUMNS, NA)
+
+        # Sostituisci doc_pos con il testo effettivo dalla lista clean_text
+        # Se la funzione restituisce clean_text come list/serie (come nel tuo codice)
+        try:
+            result["doc_pos"] = result["doc_pos"].apply(lambda x: ct[x])
+        except Exception as e:
+            # Se la funzione già restituisce 'sentence' o ha struttura diversa
+            logger.debug("Non ho potuto mappare doc_pos con ct: %s", e)
+            # Se 'doc_pos' non esiste, prova a usare colonna 'sentence' già presente
+            if 'doc_pos' not in result.columns and 'sentence' in result.columns:
+                result['doc_pos'] = result['sentence']
+            else:
+                raise
+
+        # Rinomina in 'sentence' per compatibilità
+        result.rename(columns={"doc_pos": "sentence"}, inplace=True)
+
+        # Assicuriamoci che le colonne head_start/head_end siano int e valide
+        for col in ["head_start", "head_end", "tail_start", "tail_end"]:
+            if col not in result.columns:
+                raise ValueError(f"Column {col} missing in processed data for {file}.")
+            result[col] = result[col].astype(int)
+
+        logger.info(f"Processing {file} in chunks (chunk_size={chunk_size})...")
+
+        # Itera i chunk
+        chunk_iter = chunk_dataframe(result, chunk_size)
+        for i, chunk in enumerate(chunk_iter):
+            logger.info(f"Processing chunk {i} for file {file} ({len(chunk)} rows)...")
+
+            # Convert to contiguous DataFrame and drop duplicates (come facevi tu)
+            chunk = chunk.reset_index(drop=True)
+            chunk = chunk.loc[~chunk.astype(str).duplicated()].reset_index(drop=True)
+
+            # Process & save chunk (HDF5 + meta CSV)
+            try:
+                process_and_save_chunk(chunk, tokenizer, model,
+                                       dataset_name, file, out_root,
+                                       chunk_id=i, batch_size=batch_size, max_length=MAX_LENGTH)
+            except Exception as e:
+                logger.exception("Errore durante process_and_save_chunk: %s", e)
+
+            # cleanup
             del chunk
             gc.collect()
 
-        # Clean up TensorFlow session after each file
-        tf.keras.backend.clear_session()
-    
     logger.info(f"Processing completed for dataset {dataset_name}.")
 
-
-# Main function
-#@track_emissions()
+# ============================================================
+# Main: CLI e wrapper
+# ============================================================
 def main():
     start_time = time.time()
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, required=True, help='Name of the dataset to process.')
-    parser.add_argument('--model', type=str, default='mamba', choices=['bert', 'roberta', 'mamba'], 
-                       help='Model to use for embeddings (bert, roberta, or mamba)')
+    parser.add_argument('--chunk_size', type=int, default=CHUNK_SIZE)
+    parser.add_argument('--batch_size', type=int, default=DEFAULT_BATCH_SIZE)
+    parser.add_argument('--out_dir', type=str, default="Datasets_Emb")
     args = parser.parse_args()
+
     dataset = args.dataset
-    model_name = args.model
     use_NA = False
-    preprocess_and_embed(dataset, model_name, use_NA)
-    end_time = time.time()
-    logger.info(f"Execution time: {end_time - start_time:.2f} seconds for dataset: {dataset} with model: {model_name}")
+
+    # Use explicit EmissionsTracker to measure and save consumption
+    tracker = EmissionsTracker(project_name=f"GenDataOptimized-{dataset}")
+    tracker.start()
+    try:
+        preprocess_and_embed(dataset, NA=use_NA, chunk_size=args.chunk_size, batch_size=args.batch_size, out_root=args.out_dir)
+    finally:
+        emissions = tracker.stop()  # returns emissions in kg CO2eq
+        # Get energy consumed in kWh if available from tracker. Use tracker._last_emissions_data if present.
+        kwh = None
+        try:
+            kwh = tracker._total_energy.kWh
+            # energy_consumed is in kWh according to codecarbon internals
+    
+        except Exception:
+            kwh = None
+
+        # Save kWh to file out_dir/{dataset}consumi
+        try:
+            os.makedirs(args.out_dir, exist_ok=True)
+            out_file = os.path.join(args.out_dir, f"{dataset}_consumi.txt")
+            with open(out_file, 'w', encoding='utf-8') as f:
+                if kwh is not None:
+                    f.write(str(kwh))
+                else:
+                    # fallback: write emissions (kg CO2eq) if kWh not available
+                    f.write(str(emissions))
+        except Exception as e:
+            logger.exception("Failed to write emissions file: %s", e)
+
+        end_time = time.time()
+        logger.info(f"Execution time: {end_time - start_time:.2f} seconds for dataset: {dataset}")
 
 if __name__ == "__main__":
     main()

@@ -17,3 +17,6 @@ Final/
 RawDatasets/
 Datasets/
 emissions.csv
+roberta-tf/
+results*/
+gs_results*/

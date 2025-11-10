@@ -90,7 +90,10 @@ def evaluation_and_performance(test_configuration:dict,
         
     print(test_y_true.shape,test_y_pred.shape)
         
-        
+    if test_configuration['loss'] == 'hierarchical_similarity':
+        number_of_classes = test_configuration['number_of_classes']
+        test_y_true = test_y_true[:, :number_of_classes]
+        test_y_pred = test_y_pred[:, :number_of_classes]
         
     
     if eval_method!='multi':
@@ -509,6 +512,7 @@ def chunk_kNN_prediction(training_dataset:tf.data.Dataset,
     distance = test_configuration['distance']
     top_perf = test_configuration['top_perf']
     eval_method = test_configuration['eval_method']
+    #Extract model weights or brench weight is the model is multiple mlp.
     model_weights = model.get_weights()
     threshold = test_configuration['threshold']
     
@@ -608,8 +612,12 @@ def process_train_batch_kNN(train_batch_x,
     top_perf = test_configuration['top_perf']
     eval_method=test_configuration['eval_method']
     Q=test_configuration['q']
+    branch_idx = test_configuration.get('branch_idx', None)  # Optional branch index for multi-branch models
 
     model=CreateModelSkeleton(test_configuration)
+
+    if branch_idx is not None:
+        model = tf.keras.Model(inputs=model.input, outputs=model.outputs[branch_idx])
 
     print('model process_train_batch_kNN skeleton', sum([el.size for el in model.get_weights()]))
     print('model process_train_batch_kNN model_weights', sum([el.size for el in model_weights]))
@@ -652,7 +660,12 @@ def process_train_batch_kNN_weighted(train_batch_x,
     # Pesi delle classi: w_c = 1 / freq(c)
     class_weights = class_probabilities
 
-    model = CreateModelSkeleton(test_configuration)
+    branch_idx = test_configuration.get('branch_idx', None)  # Optional branch index for multi-branch models
+
+    model=CreateModelSkeleton(test_configuration)
+
+    if branch_idx is not None:
+        model = tf.keras.Model(inputs=model.input, outputs=model.outputs[branch_idx])
 
     model.set_weights(model_weights)
     

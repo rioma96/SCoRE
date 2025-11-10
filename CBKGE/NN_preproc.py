@@ -5,6 +5,24 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
+import random
+
+def wrapper(columns_per_part,parts):
+    def transform_labels(features, labels):
+        # Create an empty dictionary for the transformed labels
+        y_dict = {}
+        
+        # Split the labels tensor (shape 24,) into 6 groups of 4 elements each
+        for i in range(parts):
+            # Extract 4 elements starting at position i*4
+            group = labels[i*columns_per_part:(i+1)*columns_per_part]
+            
+            # Assign this group to a branch key (converting to int32 as required)
+            y_dict[f"branch_{i}_norm"] = tf.cast(group, tf.int32)
+        
+        # Return the features and transformed labels
+        return features, y_dict
+    return transform_labels
 
 def distant_selector(df,p_distant):
     indices_distant=np.random.choice(df.index,int(len(df)*p_distant),replace=False).tolist()
@@ -83,16 +101,41 @@ def df_raw_rebalancing(df,balance=False):
     
 
 #Split data of embeddings in CLS, Head and Tail
-def split_embeddings(df):
+def split_embeddings(df,embedding_type):
     
     # Splitting the list into separate columns
     df[['emb_cls', 'emb_head', 'emb_tail']] = df['embeddings'].apply(pd.Series)
     
     # Dropping the original column with lists
     df.drop('embeddings', axis=1, inplace=True)
-    
-    df['emb_head'] = df['emb_head'].apply(lambda x: tf.reduce_mean(x, axis=0))
-    df['emb_tail'] = df['emb_tail'].apply(lambda x: tf.reduce_mean(x, axis=0))
+    print("Stampa struttura emb head")
+    print(df['emb_head'].iloc[0].shape)
+
+    if embedding_type == 'average':
+        # --- Mean pooling (your current baseline) ---
+        df['emb_head'] = df['emb_head'].apply(lambda x: tf.reduce_mean(x, axis=0))
+        df['emb_tail'] = df['emb_tail'].apply(lambda x: tf.reduce_mean(x, axis=0))
+    elif embedding_type == 'max':
+        # --- Max pooling ---
+        df['emb_head'] = df['emb_head'].apply(lambda x: tf.reduce_max(x, axis=0))
+        df['emb_tail'] = df['emb_tail'].apply(lambda x: tf.reduce_max(x, axis=0))
+    elif embedding_type == 'first':
+        # --- First token only ---
+        df['emb_head'] = df['emb_head'].apply(lambda x: x[0])
+        df['emb_tail'] = df['emb_tail'].apply(lambda x: x[0])
+    elif embedding_type == 'last':
+        # --- Last token only ---
+        df['emb_head'] = df['emb_head'].apply(lambda x: x[-1])
+        df['emb_tail'] = df['emb_tail'].apply(lambda x: x[-1])
+    elif embedding_type == 'boundary':
+        # --- Boundary concatenation (first + last) ---
+        df['emb_head'] = df['emb_head'].apply(lambda x: tf.concat([x[0], x[-1]], axis=0))
+        df['emb_tail'] = df['emb_tail'].apply(lambda x: tf.concat([x[0], x[-1]], axis=0))
+    elif embedding_type == 'mean_max':
+        # --- Mean + Max concatenation ---
+        df['emb_head'] = df['emb_head'].apply(lambda x: tf.concat([tf.reduce_mean(x, axis=0), tf.reduce_max(x, axis=0)], axis=0))
+        df['emb_tail'] = df['emb_tail'].apply(lambda x: tf.concat([tf.reduce_mean(x, axis=0), tf.reduce_max(x, axis=0)], axis=0))
+
     df['emb_cls'] = df['emb_cls'].apply(lambda x: x.numpy())
     df['emb_head'] = df['emb_head'].apply(lambda x: x.numpy())
     df['emb_tail'] = df['emb_tail'].apply(lambda x: x.numpy())
@@ -102,6 +145,7 @@ def split_embeddings(df):
 
 def from_file_list_to_tfdataset(file_list, 
                                 relation_dict=None,
+                                coarse_relation_dict=None,
                                 balance_triples=False, 
                                 quantile_cutoff=0.95,
                                 balance_labels=False,
@@ -111,13 +155,16 @@ def from_file_list_to_tfdataset(file_list,
                                 del_empty=False,
                                 return_df=False,
                                 return_headtail=False,
-                                cls=False):
+                                cls=False,
+                                multiple_mlp=False,
+                                hierarchical=False,
+                                embedding_type='average'):
     
     from sklearn.preprocessing import MultiLabelBinarizer
     import itertools
 
     df = pd.concat([pd.read_pickle(file) for file in file_list], ignore_index=True)
-    df = split_embeddings(df)
+    df = split_embeddings(df,embedding_type)
 
     # df = df.groupby(['sentence', 'sent_start', 'sent_end','head_start', 'head_end', 'tail_start', 'tail_end','syn_id_head', 'syn_id_tail']).agg(list)
     df = df.groupby(['syn_id_head', 'syn_id_tail','sentence']).agg(list)
@@ -139,6 +186,14 @@ def from_file_list_to_tfdataset(file_list,
     df['Concatenated'] = df.apply(concatenate_arrays, args=(cls,), axis=1)
     df = df[['Concatenated', 'link_name', 'syn_id_head', 'syn_id_tail']]
     df=df[df['Concatenated'].apply(lambda x: not np.isnan(np.sum(x)))]
+    
+    #If hierarchical is True, we need to create a hierarchical structure for the relations by adding a new column coarse_link_name that one level up in the hierarchy.
+    # Consider that a relation is in this form: [/location/location/contains] i want only [/location/location] as coarse relation.
+    #Consider also that is a list because the dataset can have multiple relations per triple.
+    if hierarchical:
+        df['coarse_link_name'] = df['link_name'].apply(lambda x: ['/' + i.split('/')[1] + '/' + i.split('/')[2] for i in x])
+        df['coarse_link_name'] = df['coarse_link_name'].apply(set_minimal_lists)
+        #print(df['coarse_link_name'].head(5))
 
     
     print("Dataset loaded")
@@ -165,6 +220,29 @@ def from_file_list_to_tfdataset(file_list,
     
     df['link_name'] = df['link_name'].apply(set_minimal_lists)
     df['link_name'] = one_hot.fit_transform(df['link_name'].to_list()).tolist()
+
+    if hierarchical:
+        if coarse_relation_dict is None:
+            coarse_codes, coarse_relation_dict = pd.factorize(df['coarse_link_name'].explode())
+            coarse_relation_dict = dict([(el, i) for i, el in enumerate(coarse_relation_dict)])
+            df['coarse_link_name'] = df['coarse_link_name'].map(lambda x: [coarse_relation_dict[i] for i in x])
+        else:
+            # Check if all values in df['coarse_link_name'] are in coarse_relation_dict
+            if all(value in coarse_relation_dict for value in df['coarse_link_name'].explode().unique()):
+                # If all values exist in coarse_relation_dict, proceed with the mapping
+                df['coarse_link_name'] = df['coarse_link_name'].map(lambda x: [coarse_relation_dict[i] for i in x])
+            else:
+                # Remove rows where at least one value is not in coarse_relation_dict
+                df = df[df['coarse_link_name'].apply(lambda x: all(i in coarse_relation_dict for i in x))]
+                # Proceed with the mapping
+                df['coarse_link_name'] = df['coarse_link_name'].map(lambda x: [coarse_relation_dict[i] for i in x])
+        
+    if hierarchical:
+        list_of_coarse_classes=np.array(list(coarse_relation_dict.values()))
+        one_hot_coarse = MultiLabelBinarizer(classes=list_of_coarse_classes)
+        df['coarse_link_name'] = df['coarse_link_name'].apply(set_minimal_lists)
+        df['coarse_link_name'] = one_hot_coarse.fit_transform(df['coarse_link_name'].to_list()).tolist()
+        print("Coarse relations mapped")
     
     if balance_labels:
         print('Balancing labels\n\n')
@@ -175,24 +253,69 @@ def from_file_list_to_tfdataset(file_list,
     print("one_hot.fit_transform done")
     print("Starting tf.data.Dataset.from_tensor_slices")
     if return_headtail:
-        training_set = tf.data.Dataset.from_tensor_slices((
-            np.array(df['Concatenated'].tolist()),
-            np.array(df['link_name'].tolist()),
-            np.array(df[['syn_id_head', 'syn_id_tail']].to_numpy())
-        ))
+        if hierarchical:
+            fine_labels = np.array(df['link_name'].tolist())
+            coarse_labels = np.array(df['coarse_link_name'].tolist())
+            # Concatenazione lungo l'asse delle feature (secondo asse)
+            all_labels = np.concatenate([fine_labels, coarse_labels], axis=1)
+            training_set = tf.data.Dataset.from_tensor_slices((
+                np.array(df['Concatenated'].tolist()),
+                all_labels,
+                np.array(df[['syn_id_head', 'syn_id_tail']].to_numpy())
+            ))
+            # training_set = tf.data.Dataset.from_tensor_slices((
+            #     np.array(df['Concatenated'].tolist()),
+            #     (np.array(df['link_name'].tolist()), np.array(df['coarse_link_name'].tolist())),
+            #     np.array(df[['syn_id_head', 'syn_id_tail']].to_numpy())
+            # ))
+        else:
+            training_set = tf.data.Dataset.from_tensor_slices((
+                np.array(df['Concatenated'].tolist()),
+                np.array(df['link_name'].tolist()),
+                np.array(df[['syn_id_head', 'syn_id_tail']].to_numpy())
+            ))
     else:
-        training_set = tf.data.Dataset.from_tensor_slices((
-            np.array(df['Concatenated'].tolist()),
-            np.array(df['link_name'].tolist())
-        ))
+        if hierarchical:
+
+            fine_labels = np.array(df['link_name'].tolist())
+            coarse_labels = np.array(df['coarse_link_name'].tolist())
+            # Concatenazione lungo l'asse delle feature (secondo asse)
+            all_labels = np.concatenate([fine_labels, coarse_labels], axis=1)
+            training_set = tf.data.Dataset.from_tensor_slices((
+                np.array(df['Concatenated'].tolist()),
+                all_labels
+            ))
+            # training_set = tf.data.Dataset.from_tensor_slices((
+            #     np.array(df['Concatenated'].tolist()),
+            #     (np.array(df['link_name'].tolist()), np.array(df['coarse_link_name'].tolist()))
+            # ))
+        else:
+            training_set = tf.data.Dataset.from_tensor_slices((
+                np.array(df['Concatenated'].tolist()),
+                np.array(df['link_name'].tolist())
+            ))
 
     print("tfdataset created")
+
+    if multiple_mlp:
+        ncol = len(relation_dict)  # Numero totale di classi/relazioni
+        n_branches = ncol  
+        columns_per_branch=int(ncol/n_branches)
+        label_transformation = wrapper(columns_per_branch,n_branches)
+        training_set = training_set.map(label_transformation)
+        print("Multiple branches created")
+
+        
     
     to_return = [relation_dict, training_set]
     if return_df:
         to_return = to_return+[df]
     if get_thresholds:
         to_return = [thresholds] + to_return
+    if hierarchical:
+        to_return =  to_return + [coarse_relation_dict]
+
+
     return to_return
 
 
@@ -363,3 +486,94 @@ def HT_sentence_matching(file_list,
     
     
     return relation_dict, df
+
+###########################################################################
+########### BALANCED BATCHING UTILITIES
+###########################################################################
+
+def build_balanced_class_batches_from_df(
+    df,
+    input_col,              # column with arrays / tensors
+    label_col,              # column with multi-hot labels
+    k_per_class=5,          # samples per class in each final batch
+    seed=300,
+    batch_shuffle_buffer=256,   # how many full batches to keep in a shuffle buffer
+    prefetch=True
+):
+    """
+    Returns a tf.data.Dataset that yields batches of size k_per_class * n_classes.
+    Each batch contains exactly k_per_class examples sampled (with repetition) from each class bucket.
+    """
+    # Set seeds for determinism
+    random.seed(seed)
+    np.random.seed(seed)
+    tf.random.set_seed(seed)
+
+    # Materialize arrays from the DataFrame
+    X = np.stack(df[input_col].to_numpy(), axis=0)
+    Y = np.stack(df[label_col].to_numpy(), axis=0).astype(np.int32)
+
+    n_classes = Y.shape[1]
+    assert Y.ndim == 2, "label_col must be multi-hot (2D) with shape [n_samples, n_classes]"
+
+    # Per-class datasets (examples may appear in multiple classes if multi-label)
+    class_datasets = []
+    for c in range(n_classes):
+        idx = np.where(Y[:, c] == 1)[0]
+        if idx.size == 0:
+            # If a class has no samples, we can't build balanced batches that include it.
+            # You can: (a) skip it, (b) synthesize data, or (c) raise.
+            # Here we skip it gracefully by continuing.
+            continue
+
+        Xc = X[idx]
+        Yc = Y[idx]
+
+        # Build per-class dataset
+        ds_c = tf.data.Dataset.from_tensor_slices((Xc, Yc))
+        # Shuffle within class; repeat to provide an infinite stream (upsampling rare classes)
+        ds_c = ds_c.shuffle(buffer_size=max(len(idx), 1), seed=seed, reshuffle_each_iteration=True).repeat()
+        # Take k_per_class at a time from this class
+        ds_c = ds_c.batch(k_per_class, drop_remainder=True)
+        class_datasets.append(ds_c)
+
+    if not class_datasets:
+        raise ValueError("No classes with samples were found.")
+
+    n_effective_classes = len(class_datasets)
+
+    # Zip one chunk from each class, then concat along the batch dimension
+    def _merge_batches(*class_batches):
+        # class_batches is a tuple of (x_batch, y_batch) from each class
+        xs = [xb for xb, _ in class_batches]
+        ys = [yb for _, yb in class_batches]
+        x = tf.concat(xs, axis=0)  # [k_per_class * n_effective_classes, ...]
+        y = tf.concat(ys, axis=0)  # [k_per_class * n_effective_classes, n_classes]
+        return x, y
+
+    balanced = tf.data.Dataset.zip(tuple(class_datasets)).map(
+        _merge_batches,
+        num_parallel_calls=tf.data.AUTOTUNE
+    )
+
+    # Optional: shuffle at the batch level (keeps class balance within each batch)
+    if batch_shuffle_buffer and batch_shuffle_buffer > 0:
+        balanced = balanced.shuffle(batch_shuffle_buffer, seed=seed, reshuffle_each_iteration=True)
+
+    if prefetch:
+        balanced = balanced.prefetch(tf.data.AUTOTUNE)
+
+    return balanced, (k_per_class * n_effective_classes)
+
+
+##########################################################################
+########### EXTRACTION UTILITIES MULTI MLP
+##########################################################################
+
+def extract_features_and_labels_for_branch(transformed_dataset, branch_idx):
+    X = []
+    y = []
+    for features, label_dict in transformed_dataset:
+        X.append(features.numpy())
+        y.append(label_dict[f'branch_{branch_idx}_norm'].numpy())
+    return np.array(X), np.array(y)
