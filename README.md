@@ -67,8 +67,8 @@ bash generate_wiki20distant.sh
 bash generate_disrex.sh
 ```
 
-> `GenDataOptimized.py` writes processed chunks under `Datasets/...`.
-
+> `GenDataOptimized.py` writes processed chunks under `Datasets/...` and does **not** create the `Final/...` directory layout expected by `Modello_Finale.py`.
+> To train after Option B, either download the processed datasets (Option A) or move/convert outputs into `Final/...` and update the `dict_dataset` paths in `Modello_Finale.py`.
 ## Train and Evaluate
 
 Run one of the provided scripts:
